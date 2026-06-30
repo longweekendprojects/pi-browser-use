@@ -1,0 +1,29 @@
+{
+  "name": "pi-browser-use",
+  "version": "0.1.0",
+  "description": "Native pi tool that drives your real, logged-in Arc browser over CDP, with a library of hardened multi-step shortcuts.",
+  "license": "MIT",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "browser-automation",
+    "arc",
+    "chrome-devtools-protocol",
+    "cdp",
+    "playwright"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/longweekendprojects/pi-browser-use.git"
+  },
+  "homepage": "https://github.com/longweekendprojects/pi-browser-use#readme",
+  "bugs": {
+    "url": "https://github.com/longweekendprojects/pi-browser-use/issues"
+  },
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

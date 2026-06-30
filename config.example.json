@@ -1,0 +1,6 @@
+{
+  "aws": {
+    "defaultProfile": "default",
+    "ssoAccountEmail": "you@example.com"
+  }
+}
