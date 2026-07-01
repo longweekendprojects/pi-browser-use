@@ -20,9 +20,10 @@
   "bugs": {
     "url": "https://github.com/longweekendprojects/pi-browser-use/issues"
   },
-  "dependencies": {
-    "playwright-core": "^1.49.0"
+  "engines": {
+    "node": ">=22"
   },
+  "dependencies": {},
   "pi": {
     "extensions": ["./index.ts"]
   }

@@ -20,6 +20,10 @@ Because the extension lives in a global location (`~/.pi/agent/extensions/`), it
 
 Arc is Chromium, so it speaks the Chrome DevTools Protocol when launched with a debug port. The engine attaches over that port and drives the page. It never closes the user's browser; it only detaches when a call finishes. Arc enforces a single instance, so the debug port can only be enabled by launching Arc as the sole instance; `ensureArc` handles this and asks for consent before relaunching, since a relaunch interrupts the user's running browser.
 
+## Transport: raw CDP, single tab
+
+The engine talks raw Chrome DevTools Protocol over a WebSocket (Node's built-in `WebSocket`) and attaches to exactly one tab at a time. This is a deliberate design choice, not an incidental one. A full browser-automation library like Playwright attaches to the whole browser on connect, every page, iframe, worker, and service worker, which hangs indefinitely against a real daily-driver browser that has dozens of heavy targets open. Attaching to a single target over raw CDP is instant and unaffected by how many other tabs exist, so the tool stays reliable exactly when the user's browser is busy (the normal case). It also means the extension has no third-party dependencies. Trusted input (real mouse and keyboard events via CDP `Input.*`) is used for clicks and typing, which some sign-in flows require.
+
 ## File map
 
 ```
@@ -28,9 +32,9 @@ index.ts            Registers the browser tool. Loads the engine with a
 core.mjs            Dispatcher: routes an action to a primitive or a shortcut.
 primitives.mjs      The raw verbs: navigate, snapshot, read, click, fill,
                     eval, screenshot, tabs, tab, ensure.
-helpers.mjs         Shared building blocks: Arc launcher, CDP connect, the
-                    dedicated-agent-tab machinery, secret redaction, config,
-                    process spawning.
+helpers.mjs         Raw-CDP transport (connection + single-tab PageSession),
+                    Arc launcher, dedicated-agent-tab machinery, secret
+                    redaction, config, process spawning.
 shortcuts/
   index.mjs         Shortcut registry and catalog.
   aws-sso-login.mjs Refresh expired AWS SSO credentials end to end.

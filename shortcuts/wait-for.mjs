@@ -39,7 +39,10 @@ export async function run(params) {
           want,
         )
         .catch(() => null);
-      if (hit) return { text: `MATCHED ${hit} at ${page.url()}`, details: { matched: hit, url: page.url() } };
+      if (hit) {
+        const u = await page.url();
+        return { text: `MATCHED ${hit} at ${u}`, details: { matched: hit, url: u } };
+      }
       await sleep(intervalMs);
     }
     return { text: `TIMEOUT after ${timeoutMs}ms waiting for ${JSON.stringify(want)}`, details: { timedOut: true }, isError: true };

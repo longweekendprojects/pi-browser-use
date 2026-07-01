@@ -7,7 +7,7 @@ Unlike headless or vision-based automation, the agent reads the page's live HTML
 ## Requirements
 
 - macOS with the Arc browser installed
-- Node.js 18+
+- Node.js 22+ (uses the built-in `WebSocket` to talk to the browser; no third-party dependencies)
 - pi (this is a pi extension)
 - AWS CLI v2, only if you use the `aws-sso-login` shortcut
 

@@ -1,11 +1,21 @@
 // Primitive browser actions: the raw verbs the agent composes. Shortcuts build
-// on these. Acting verbs run ONLY on the agent's own dedicated tab; they never
-// touch a tab the user opened. `navigate` opens the agent tab if needed; `tab`
-// is the explicit handover of one of the user's tabs.
+// on these. Acting verbs run ONLY on the agent's own dedicated tab, over raw
+// CDP (attaches to that one tab, never the whole browser), so they stay fast
+// and reliable no matter how many other tabs the user has open. `navigate`
+// opens the agent tab if needed; `tab` is the explicit handover of a user tab.
 
 const Q = new URL(import.meta.url).search;
 const imp = (rel) => import(new URL(rel, import.meta.url).href + Q);
-const { withAgentPage, withConnect, adoptPage, findAgentPage, targetIdOf, ensureArc, redact, PORT } = await imp("./helpers.mjs");
+const {
+  withAgentPage,
+  withConnection,
+  listTargets,
+  getAgentTargetId,
+  setAgentTargetId,
+  ensureArc,
+  redact,
+  PORT,
+} = await imp("./helpers.mjs");
 
 export const PRIMITIVES = [
   "ensure",
@@ -21,7 +31,7 @@ export const PRIMITIVES = [
 ];
 
 // Runs in the page: tag visible interactive elements with stable refs and
-// return a compact list the agent can act on.
+// return a compact list the agent can act on. Passed to evaluate as a function.
 export function snapshotFn() {
   const sel = [
     "a[href]", "button", "input:not([type=hidden])", "select", "textarea",
@@ -54,13 +64,6 @@ export function snapshotFn() {
   return out;
 }
 
-async function doClick(page, p) {
-  if (p.ref) { await page.click(`[data-pbu-ref="${p.ref}"]`, { timeout: 10000 }); return `@${p.ref}`; }
-  if (p.selector) { await page.click(p.selector, { timeout: 10000 }); return p.selector; }
-  if (p.text) { await page.getByText(p.text, { exact: false }).first().click({ timeout: 10000 }); return `text:${p.text}`; }
-  throw new Error("click requires one of: ref, selector, text");
-}
-
 export async function runPrimitive(params, opts = {}) {
   const { action } = params;
 
@@ -75,33 +78,38 @@ export async function runPrimitive(params, opts = {}) {
   try {
     switch (action) {
       case "navigate":
-        // Opens the agent's own tab if it does not exist; never reuses a user tab.
         return await withAgentPage(async (page) => {
-          await page.goto(params.url, { waitUntil: "domcontentloaded", timeout: 30000 });
-          return { text: `OK ${page.url()}`, details: { url: page.url() } };
+          const url = await page.navigate(params.url);
+          return { text: `OK ${url}`, details: { url } };
         }, { create: true });
       case "read":
         return await withAgentPage(async (page) => {
+          const url = await page.url();
           const title = await page.title();
-          const body = redact((await page.evaluate(() => document.body?.innerText || "")).trim());
-          return { text: `URL: ${page.url()}\nTITLE: ${title}\n---\n${body.slice(0, params.limit || 4000)}`, details: { url: page.url(), title } };
+          const body = redact((await page.innerText()).trim());
+          return { text: `URL: ${url}\nTITLE: ${title}\n---\n${body.slice(0, params.limit || 4000)}`, details: { url, title } };
         });
       case "snapshot":
         return await withAgentPage(async (page) => {
-          const els = await page.evaluate(snapshotFn);
+          const url = await page.url();
+          const els = (await page.evaluate(snapshotFn)) || [];
           const lines = els.map((e) => `@${e.ref} ${e.role}${e.type ? `[${e.type}]` : ""} ${JSON.stringify(redact(e.name))}`);
-          return { text: `${page.url()}\n${els.length} interactive elements:\n${lines.join("\n")}`, details: { url: page.url(), elements: els } };
+          return { text: `${url}\n${els.length} interactive elements:\n${lines.join("\n")}`, details: { url, elements: els } };
         });
       case "click":
         return await withAgentPage(async (page) => {
-          const t = await doClick(page, params);
+          let t;
+          if (params.ref) t = await page.clickRef(params.ref);
+          else if (params.selector) t = await page.clickSelector(params.selector);
+          else if (params.text) t = await page.clickText(params.text);
+          else throw new Error("click requires one of: ref, selector, text");
           return { text: `CLICKED ${t}`, details: { target: t } };
         });
       case "fill":
         return await withAgentPage(async (page) => {
           const sel = params.ref ? `[data-pbu-ref="${params.ref}"]` : params.selector;
           if (!sel) throw new Error("fill requires ref or selector");
-          await page.fill(sel, params.value ?? params.text ?? "", { timeout: 10000 });
+          await page.fill(sel, params.value ?? params.text ?? "");
           return { text: `FILLED ${sel}`, details: { selector: sel } };
         });
       case "eval":
@@ -111,32 +119,25 @@ export async function runPrimitive(params, opts = {}) {
         });
       case "screenshot":
         return await withAgentPage(async (page) => {
-          await page.screenshot({ path: params.path, fullPage: !!params.fullPage });
+          await page.screenshot(params.path);
           return { text: `SAVED ${params.path}`, details: { path: params.path } };
         });
       case "tabs":
-        // Read-only: lists every tab and marks the one the agent owns.
-        return await withConnect(async (ctx) => {
-          const agent = await findAgentPage(ctx);
-          const agentId = agent ? await targetIdOf(ctx, agent) : null;
-          const lines = [];
-          for (const [i, pg] of ctx.pages().entries()) {
-            if (pg.url().startsWith("devtools://")) continue;
-            const mine = (await targetIdOf(ctx, pg)) === agentId ? "  <- agent tab" : "";
-            lines.push(`[${i}] ${await pg.title()}  ${pg.url()}${mine}`);
-          }
-          return { text: lines.join("\n"), details: { count: ctx.pages().length } };
+        return await withConnection(async () => {
+          const targets = await listTargets();
+          const agentId = getAgentTargetId();
+          const lines = targets.map((t, i) => `[${i}] ${t.title || ""}  ${t.url}${t.id === agentId ? "  <- agent tab" : ""}`);
+          return { text: lines.join("\n"), details: { count: targets.length } };
         });
       case "tab":
-        // Explicit handover: the user points the agent at an existing tab.
-        return await withConnect(async (ctx) => {
-          const pages = ctx.pages().filter((p) => !p.url().startsWith("devtools://"));
+        return await withConnection(async () => {
+          const targets = await listTargets();
           let target = null;
-          if (params.index != null && params.index !== "") target = pages[Number(params.index)];
-          else if (params.url) target = pages.find((p) => p.url().includes(params.url));
+          if (params.index != null && params.index !== "") target = targets[Number(params.index)];
+          else if (params.url) target = targets.find((t) => String(t.url).includes(params.url));
           if (!target) return { text: `No tab matched ${params.index ?? params.url ?? "(nothing given)"}. Use action=tabs to list them.`, details: {}, isError: true };
-          await adoptPage(ctx, target);
-          return { text: `Agent now controls: ${await target.title()}  ${target.url()}`, details: { url: target.url() } };
+          setAgentTargetId(target.id);
+          return { text: `Agent now controls: ${target.title || ""}  ${target.url}`, details: { url: target.url } };
         });
       default:
         return { text: `ERROR: unknown primitive ${action}`, isError: true };
