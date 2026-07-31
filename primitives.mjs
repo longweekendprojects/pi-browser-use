@@ -10,8 +10,12 @@ const {
   withAgentPage,
   withConnection,
   listTargets,
-  getAgentTargetId,
-  setAgentTargetId,
+  getAgentTarget,
+  canCloseAgentTarget,
+  setAgentTarget,
+  clearAgentTarget,
+  closeTarget,
+  cdpUp,
   ensureArc,
   redact,
   PORT,
@@ -28,6 +32,7 @@ export const PRIMITIVES = [
   "screenshot",
   "tabs",
   "tab",
+  "close",
 ];
 
 // Runs in the page: tag visible interactive elements with stable refs and
@@ -70,6 +75,38 @@ export async function runPrimitive(params, opts = {}) {
   if (action === "ensure") {
     const r = await ensureArc(opts);
     return { text: r.ok ? `Arc CDP ready on ${PORT}${r.relaunched ? " (relaunched)" : ""}` : `ERROR: ${r.error}`, details: r, isError: !r.ok };
+  }
+
+  if (action === "close") {
+    const saved = getAgentTarget();
+    if (!saved) return { text: "No agent tab to close.", details: { noAgentTab: true } };
+    if (!canCloseAgentTarget(saved)) {
+      return {
+        text: "REFUSED: this tab was not recorded as agent-created, so it will not be closed.",
+        details: { ownership: saved.ownership },
+        isError: true,
+      };
+    }
+    if (!(await cdpUp())) {
+      return {
+        text: "ERROR: Arc browser control is not connected. The tab was left open; `close` will not relaunch Arc.",
+        details: { cdpUnavailable: true },
+        isError: true,
+      };
+    }
+    try {
+      return await withConnection(async (cdp) => {
+        const targets = await listTargets();
+        if (targets.some((t) => t.id === saved.id)) {
+          const result = await closeTarget(cdp, saved.id);
+          if (result?.success === false) throw new Error("Arc refused to close the agent-created tab");
+        }
+        clearAgentTarget();
+        return { text: "CLOSED agent-created tab.", details: { targetId: saved.id } };
+      });
+    } catch (e) {
+      return { text: `ERROR: ${e.message}`, details: {}, isError: true };
+    }
   }
 
   const ens = await ensureArc(opts);
@@ -125,8 +162,12 @@ export async function runPrimitive(params, opts = {}) {
       case "tabs":
         return await withConnection(async () => {
           const targets = await listTargets();
-          const agentId = getAgentTargetId();
-          const lines = targets.map((t, i) => `[${i}] ${t.title || ""}  ${t.url}${t.id === agentId ? "  <- agent tab" : ""}`);
+          const saved = getAgentTarget();
+          const lines = targets.map((t, i) => {
+            const label = saved?.ownership === "created" ? "agent tab" : saved?.ownership === "adopted" ? "adopted tab" : "legacy tab (ownership unknown)";
+            const marker = t.id === saved?.id ? `  <- ${label}` : "";
+            return `[${i}] ${t.title || ""}  ${t.url}${marker}`;
+          });
           return { text: lines.join("\n"), details: { count: targets.length } };
         });
       case "tab":
@@ -136,7 +177,7 @@ export async function runPrimitive(params, opts = {}) {
           if (params.index != null && params.index !== "") target = targets[Number(params.index)];
           else if (params.url) target = targets.find((t) => String(t.url).includes(params.url));
           if (!target) return { text: `No tab matched ${params.index ?? params.url ?? "(nothing given)"}. Use action=tabs to list them.`, details: {}, isError: true };
-          setAgentTargetId(target.id);
+          setAgentTarget(target.id, "adopted");
           return { text: `Agent now controls: ${target.title || ""}  ${target.url}`, details: { url: target.url } };
         });
       default:

@@ -46,6 +46,7 @@ Arc must run with the debug port. The tool's `ensure` action (and every shortcut
 | `screenshot` | Save a PNG of the active tab |
 | `tabs` | List open tabs, marking the agent's own tab |
 | `tab` | Explicitly hand the agent one of your tabs, by `index` or `url` |
+| `close` | Close the agent-created tab; refuses tabs handed over with `tab` |
 
 **Shortcuts** are hardened, named sequences captured from a real, debugged run, so the messy parts (redirect chains, shadow-DOM cookie banners, which tab to drive, which account to pick) are baked in rather than rediscovered:
 
@@ -58,7 +59,7 @@ A shortcut earns its place only after a real flow proves it is needed and has ru
 
 ## Tab safety guarantee
 
-The agent acts only on its own dedicated tab, tracked by a stable CDP target id that persists across calls. `navigate` opens that tab if it does not exist; it never reuses a tab you opened. Read and action verbs refuse to run when no agent tab exists rather than grabbing one of yours. The single way the agent touches a tab you opened is when you explicitly hand it over with `tab` (by `index` or `url`). Tabs you have open stay at the URLs you left them.
+The agent acts only on its own dedicated tab, tracked by a stable CDP target id that persists across calls. `navigate` opens that tab if it does not exist; it never reuses a tab you opened. Read and action verbs refuse to run when no agent tab exists rather than grabbing one of yours. The single way the agent touches a tab you opened is when you explicitly hand it over with `tab` (by `index` or `url`). `close` closes only a tab recorded as agent-created and refuses user tabs adopted through `tab`. Tabs you have open stay at the URLs you left them.
 
 ## Configuration
 

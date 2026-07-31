@@ -49,7 +49,7 @@ export default async function (pi: ExtensionAPI) {
       "Fallback browser control, not a default. Prefer native CLIs/APIs for links and data (notion-cli, linear-cli, gh, the Slack API, fetch_content, web_search); reach for this only when no native tool can reach the resource, the native tool hits a real limit, the task needs the rendered or logged-in page, or the user explicitly asks. " +
       "Drives the user's real, logged-in Arc browser over the Chrome DevTools Protocol, reusing their tabs, cookies, and logins. " +
       "It only ever acts on its own dedicated tab and never reuses a tab the user opened; `tab` is the explicit handover of one of the user's tabs. " +
-      "Primitives: ensure (start Arc with the debug port), navigate (opens the agent's own tab), snapshot (list interactive elements with @eN refs), read (page text), click (ref/selector/text), fill (ref/selector + value), eval (JS), screenshot, tabs (list, marks the agent tab), tab (take over a user tab by index/url). " +
+      "Primitives: ensure (start Arc with the debug port), navigate (opens the agent's own tab), snapshot (list interactive elements with @eN refs), read (page text), click (ref/selector/text), fill (ref/selector + value), eval (JS), screenshot, tabs (list, marks the agent tab), tab (take over a user tab by index/url), close (close only an agent-created tab). " +
       "Shortcuts (hardened multi-step flows): " + catalog.join(" | "),
     promptSnippet:
       "Control the user's logged-in Arc browser: primitives (navigate/snapshot/click/fill/read) plus shortcuts (aws-sso-login, wait-for)",
@@ -57,7 +57,7 @@ export default async function (pi: ExtensionAPI) {
       "The browser is a fallback, not the default. For a link or external data, try the native tool first (notion-cli, linear-cli, gh, the Slack API, fetch_content, web_search); use the browser only when no native tool can reach it, the native tool hits a real limit (missing scope, rendered-only value), the task needs an interactive or visual flow, or the user explicitly asks. When you fall back, say in one line why the native path did not fit.",
       "browser primitive workflow: navigate, then snapshot to get @eN refs, then click/fill by ref; use read for page text, wait-for instead of sleeping, and eval for anything the page model cannot express.",
       "Prefer a browser shortcut when one fits the task: aws-sso-login refreshes expired AWS SSO credentials end to end; wait-for blocks until a URL/text/selector appears.",
-      "The browser tool never navigates or alters a tab the user already opened; it works in its own tab. Only use `tab` to adopt one of the user's tabs when the user explicitly asks you to operate on it.",
+      "The browser tool never navigates or alters a tab the user already opened; it works in its own tab. Only use `tab` to adopt one of the user's tabs when the user explicitly asks you to operate on it. Use `close` when the browser task ends; it closes only a tab recorded as agent-created and refuses adopted user tabs.",
       "When AWS commands fail with expired/missing SSO token, call browser with action aws-sso-login to refresh before retrying.",
     ],
     parameters: Type.Object({
