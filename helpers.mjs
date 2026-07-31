@@ -326,11 +326,25 @@ function writeState(s) {
   }
 }
 
-export function setAgentTargetId(id) {
-  writeState({ agentTargetId: id });
+export function setAgentTarget(id, ownership) {
+  writeState({ agentTargetId: id, agentTargetOwnership: ownership });
+}
+export function clearAgentTarget() {
+  writeState({});
+}
+export function getAgentTarget() {
+  const state = readState();
+  if (!state.agentTargetId) return null;
+  const ownership = state.agentTargetOwnership === "created" || state.agentTargetOwnership === "adopted"
+    ? state.agentTargetOwnership
+    : "unknown";
+  return { id: state.agentTargetId, ownership };
 }
 export function getAgentTargetId() {
-  return readState().agentTargetId || null;
+  return getAgentTarget()?.id || null;
+}
+export function canCloseAgentTarget(target) {
+  return target?.ownership === "created";
 }
 
 // Run fn against the agent's own tab. With create=true, opens a fresh tab when
@@ -339,8 +353,8 @@ export function getAgentTargetId() {
 export async function withAgentPage(fn, { create = false } = {}) {
   return withConnection(async (cdp) => {
     const targets = await listTargets();
-    const owned = getAgentTargetId();
-    let targetId = owned && targets.some((t) => t.id === owned) ? owned : null;
+    const saved = getAgentTarget();
+    let targetId = saved?.id && targets.some((t) => t.id === saved.id) ? saved.id : null;
     if (!targetId) {
       if (!create) {
         return {
@@ -351,7 +365,7 @@ export async function withAgentPage(fn, { create = false } = {}) {
       }
       const { targetId: newId } = await cdp.send("Target.createTarget", { url: "about:blank" });
       targetId = newId;
-      setAgentTargetId(targetId);
+      setAgentTarget(targetId, "created");
       await sleep(150);
     }
     const page = await attach(cdp, targetId);
@@ -369,7 +383,7 @@ export async function createPage(cdp, url = "about:blank") {
   return attach(cdp, targetId);
 }
 export async function closeTarget(cdp, targetId) {
-  await cdp.send("Target.closeTarget", { targetId }).catch(() => {});
+  return cdp.send("Target.closeTarget", { targetId });
 }
 
 // Keep obvious secrets out of model-visible output and session logs.

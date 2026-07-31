@@ -44,13 +44,13 @@ test-harness.mjs    Runs the dispatcher in a fresh process for verification.
 
 ## Two layers
 
-**Primitives** are the raw verbs an agent composes: `navigate`, `snapshot` (lists interactive elements with stable `@eN` refs), `read`, `click`, `fill`, `eval`, `screenshot`, `tabs`, `tab`, `ensure`. They read the page's structured HTML, so the agent decides what to do from element data and text, never from a screenshot.
+**Primitives** are the raw verbs an agent composes: `navigate`, `snapshot` (lists interactive elements with stable `@eN` refs), `read`, `click`, `fill`, `eval`, `screenshot`, `tabs`, `tab`, `close`, `ensure`. They read the page's structured HTML, so the agent decides what to do from element data and text, never from a screenshot.
 
 **Shortcuts** are hardened, named sequences captured from a real, debugged run. They bake in the messy parts (redirect chains, shadow-DOM cookie banners, which tab to drive, which account to pick) so an agent calls one verb instead of rediscovering the flow. A shortcut earns its place only after a real flow proves it is needed and has run green. No speculative recipes.
 
 ## Tab-safety guarantee
 
-The agent acts only on its own dedicated tab, identified by a stable CDP target id persisted in `~/.pi/state/pi-browser-use.json`. `navigate` opens that tab if it does not exist and never reuses a tab the user opened. Read and action verbs refuse to run when no agent tab exists rather than grabbing one of the user's tabs. The only way the agent touches a user tab is the explicit `tab` action (by index or url). Tabs the user has open stay where they left them.
+The agent acts only on its own dedicated tab, identified by a stable CDP target id and ownership marker persisted in `~/.pi/state/pi-browser-use.json`. `navigate` records new tabs as agent-created; explicit `tab` handovers are recorded as adopted. `close` closes only agent-created tabs and refuses adopted or legacy targets whose ownership is unknown. Read and action verbs refuse to run when no agent tab exists rather than grabbing one of the user's tabs. Tabs the user has open stay where they left them.
 
 ## Hot-reload
 

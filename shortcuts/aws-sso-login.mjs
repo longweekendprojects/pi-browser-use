@@ -149,7 +149,7 @@ export async function run(params, opts = {}) {
     } catch (e) {
       result = { text: `ERROR: ${e.message}`, details: {}, isError: true };
     } finally {
-      await closeTarget(cdp, page.targetId); // close only the tab we created
+      await closeTarget(cdp, page.targetId).catch(() => {}); // close only the tab we created
       if (login.child.exitCode === null) login.child.kill();
     }
     return result;
