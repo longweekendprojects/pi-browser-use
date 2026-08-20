@@ -23,7 +23,8 @@ A shortcut graduates into the library only after you have run the real flow with
 
 ## Add or change a primitive
 
-Edit `primitives.mjs`. Keep acting verbs on the agent's own tab: use `withAgentPage(...)` (which refuses when no agent tab exists) rather than grabbing whatever tab is frontmost. Use `withConnect(...)` only for read-only, whole-context actions like listing tabs. Never navigate or mutate a tab the user opened; `tab` is the only adoption path.
+Edit `primitives.mjs`. Reach the browser through `ensureBrowser`, never by launching a named app: the browser is resolved from config, the live debug port, and the macOS default browser (see ARCHITECTURE.md > Browser selection). When something browser-specific comes up, add it to the registry in `helpers.mjs` rather than branching on Arc.
+ Keep acting verbs on the agent's own tab: use `withAgentPage(...)` (which refuses when no agent tab exists) rather than grabbing whatever tab is frontmost. Use `withConnect(...)` only for read-only, whole-context actions like listing tabs. Never navigate or mutate a tab the user opened; `tab` is the only adoption path.
 
 ## Verification discipline (important)
 

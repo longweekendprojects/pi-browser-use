@@ -10,7 +10,7 @@
 // Requires Node 22+ (global WebSocket and fetch).
 
 import { execFile, spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -68,27 +68,283 @@ export async function cdpUp() {
   return (await httpJson("/json/version", 2000)) != null;
 }
 
-// Guarantee Arc is running with the CDP port. No-op when already up. Relaunch
-// needs a quit+reopen (tabs/logins persist); gate it behind `confirm`.
-export async function ensureArc({ confirm } = {}) {
-  if (await cdpUp()) return { ok: true, relaunched: false };
-  const ps = await sh("pgrep", ["-x", "Arc"]);
-  if (ps.stdout.trim()) {
-    const ok = confirm
-      ? await confirm(
-          "Arc is running without the debug port. Quit and relaunch Arc to enable browser control? Your tabs, spaces, and logins are restored.",
-        )
-      : true;
-    if (!ok) return { ok: false, error: "User declined Arc relaunch" };
-    await sh("osascript", ["-e", 'quit app "Arc"']);
-    await sleep(2500);
+// --- Browser selection ------------------------------------------------------
+// The engine speaks Chrome DevTools Protocol, so it drives any Chromium-family
+// browser; only launching is browser-specific. Arc is the browser this tool was
+// built against, but a machine whose everyday browser is Chrome, Edge, or Brave
+// should be driven there instead of having Arc relaunched under the user.
+//
+// `profileLock` records the Chromium 136 change that made --remote-debugging-port
+// a no-op on the default profile: from that version a browser can only be driven
+// with a separate --user-data-dir, which is a fresh profile without the user's
+// logins. Such a browser cannot honor this tool's premise (act inside the user's
+// real session), so it is chosen only when nothing better is installed and only
+// with an explicit userDataDir opt-in.
+//
+// `chromiumVersioned` says whether the app's own version number is the Chromium
+// version. Chrome, Edge, and Chromium version in lockstep with Chromium, so a
+// build older than 136 can be proven unlocked. Brave (1.x), Vivaldi (7.x), and
+// Opera number on their own tracks, so their version proves nothing and they are
+// assumed locked rather than promised to the user as drivable.
+
+export const BROWSERS = {
+  arc: { label: "Arc", app: "Arc", proc: "Arc", bundleId: "company.thebrowser.browser" },
+  dia: { label: "Dia", app: "Dia", proc: "Dia", bundleId: "company.thebrowser.dia" },
+  chrome: { label: "Google Chrome", app: "Google Chrome", proc: "Google Chrome", bundleId: "com.google.chrome", profileLock: { since: 136, chromiumVersioned: true } },
+  edge: { label: "Microsoft Edge", app: "Microsoft Edge", proc: "Microsoft Edge", bundleId: "com.microsoft.edgemac", profileLock: { since: 136, chromiumVersioned: true } },
+  chromium: { label: "Chromium", app: "Chromium", proc: "Chromium", bundleId: "org.chromium.chromium", profileLock: { since: 136, chromiumVersioned: true } },
+  brave: { label: "Brave Browser", app: "Brave Browser", proc: "Brave Browser", bundleId: "com.brave.browser", profileLock: { since: 136, chromiumVersioned: false } },
+  vivaldi: { label: "Vivaldi", app: "Vivaldi", proc: "Vivaldi", bundleId: "com.vivaldi.vivaldi", profileLock: { since: 136, chromiumVersioned: false } },
+  opera: { label: "Opera", app: "Opera", proc: "Opera", bundleId: "com.operasoftware.opera", profileLock: { since: 136, chromiumVersioned: false } },
+};
+
+// Browsers that exist on macOS but cannot be driven by this tool at all, with
+// the reason the user needs to hear instead of a generic connection timeout.
+export const UNDRIVABLE_BROWSERS = {
+  safari: {
+    label: "Safari",
+    bundleId: "com.apple.safari",
+    reason:
+      "Safari does not speak the Chrome DevTools Protocol. Its WebDriver and MCP automation run an isolated session that does not carry your cookies or logins, which is the whole point of this tool, so Safari is not supported.",
+  },
+  firefox: {
+    label: "Firefox",
+    bundleId: "org.mozilla.firefox",
+    reason: "Firefox does not expose the Chrome DevTools Protocol endpoint this tool drives, so it is not supported.",
+  },
+};
+
+// Order used when neither config nor the system default settles it. Browsers
+// that can still be driven on the user's real profile come first.
+const PREFERENCE = ["arc", "dia", "chrome", "edge", "brave", "vivaldi", "chromium", "opera"];
+
+const APP_DIRS = ["/Applications", join(homedir(), "Applications"), "/System/Applications"];
+
+function appPath(spec) {
+  for (const d of APP_DIRS) {
+    const p = join(d, `${spec.app}.app`);
+    if (existsSync(p)) return p;
   }
-  await sh("open", ["-na", "Arc", "--args", `--remote-debugging-port=${PORT}`, `--remote-allow-origins=${ORIGIN}`]);
+  return null;
+}
+
+async function appMajorVersion(path) {
+  const r = await sh("defaults", ["read", join(path, "Contents", "Info.plist"), "CFBundleShortVersionString"], 5000);
+  const m = r.stdout.trim().match(/^(\d+)/);
+  return m ? Number(m[1]) : null;
+}
+
+function expandHome(p) {
+  return p?.startsWith("~") ? join(homedir(), p.slice(1)) : p || null;
+}
+
+// The browser macOS opens links in, as a registry key ('chrome'), an undrivable
+// key ('safari'), or a raw bundle id when it is something we do not know. Returns
+// null when LaunchServices could not be read: an unreadable preference file is not
+// evidence that the user browses in Safari, and saying so would send them looking
+// in the wrong place.
+export async function systemDefaultBrowser() {
+  const plist = join(homedir(), "Library", "Preferences", "com.apple.LaunchServices", "com.apple.launchservices.secure.plist");
+  const r = await sh("plutil", ["-convert", "json", "-o", "-", plist], 5000);
+  let id;
+  try {
+    const handlers = JSON.parse(r.stdout)?.LSHandlers || [];
+    const https = handlers.find((h) => h.LSHandlerURLScheme === "https") || handlers.find((h) => h.LSHandlerURLScheme === "http");
+    // A parsed file with no https handler means the user never changed the handler,
+    // which is macOS shipping Safari as the default.
+    id = String(https?.LSHandlerRoleAll || "com.apple.safari");
+  } catch {
+    return null;
+  }
+  id = id.toLowerCase();
+  for (const [key, spec] of Object.entries(BROWSERS)) if (spec.bundleId === id) return key;
+  for (const [key, spec] of Object.entries(UNDRIVABLE_BROWSERS)) if (spec.bundleId === id) return key;
+  return id;
+}
+
+// What is installed, at which version, and whether it can be driven on the
+// user's own profile. Used for selection and for the `browsers` action.
+export async function detectBrowsers({ userDataDir } = {}) {
+  const found = [];
+  for (const key of PREFERENCE) {
+    const spec = BROWSERS[key];
+    const path = appPath(spec);
+    if (!path) continue;
+    const lock = spec.profileLock;
+    const major = lock?.chromiumVersioned ? await appMajorVersion(path) : null;
+    const profileLocked = isProfileLocked(spec, major);
+    found.push({
+      key,
+      label: spec.label,
+      path,
+      major,
+      versionUnknown: Boolean(lock?.chromiumVersioned && major == null),
+      profileLocked,
+      realProfile: !profileLocked,
+      drivable: !profileLocked || Boolean(userDataDir),
+    });
+  }
+  return found;
+}
+
+// Fail closed: a profile lock is lifted only by a version that proves the build
+// predates it. An unreadable version, or a browser whose numbering does not track
+// Chromium, counts as locked, because promising the user their logged-in profile
+// and then failing to open the port costs them the browser they were working in.
+export function isProfileLocked(spec, major) {
+  const lock = spec?.profileLock;
+  if (!lock) return false;
+  return !(lock.chromiumVersioned && major != null && major < lock.since);
+}
+
+// Pure choice given what the machine looks like, so the ordering is testable
+// without a browser. Returns { ok, key?, note?, error? }.
+export function chooseBrowser({ configured, systemDefault, installed, userDataDir }) {
+  const byKey = (k) => installed.find((b) => b.key === k);
+
+  if (configured) {
+    const key = String(configured).toLowerCase();
+    if (UNDRIVABLE_BROWSERS[key]) return { ok: false, error: `Configured browser "${key}" cannot be driven. ${UNDRIVABLE_BROWSERS[key].reason}` };
+    if (!BROWSERS[key]) return { ok: false, error: `Unknown browser "${configured}". Known: ${Object.keys(BROWSERS).join(", ")}.` };
+    const b = byKey(key);
+    if (!b) return { ok: false, error: `Configured browser ${BROWSERS[key].label} is not installed.` };
+    if (!b.drivable) return { ok: false, error: profileLockError(b) };
+    return { ok: true, key, note: `configured browser` };
+  }
+
+  const def = byKey(systemDefault);
+  if (def?.realProfile) return { ok: true, key: def.key, note: "your default browser" };
+
+  const best = installed.find((b) => b.realProfile);
+  if (best) {
+    const why = UNDRIVABLE_BROWSERS[systemDefault]
+      ? `${UNDRIVABLE_BROWSERS[systemDefault].label} is your default browser but cannot be driven`
+      : def
+        ? `${def.label} is your default browser but only exposes debugging on a throwaway profile`
+        : systemDefault
+          ? "your default browser is not a supported Chromium browser"
+          : "your default browser could not be determined";
+    return { ok: true, key: best.key, note: `${why}, so ${best.label} is used instead` };
+  }
+
+  const fallback = (def?.drivable && def) || installed.find((b) => b.drivable);
+  if (fallback) return { ok: true, key: fallback.key, note: `using the separate automation profile at ${userDataDir}` };
+
+  const locked = installed.filter((b) => b.profileLocked);
+  if (locked.length) return { ok: false, error: profileLockError(locked[0]) };
+  return {
+    ok: false,
+    error: `No supported browser found. This tool drives Chromium-family browsers (${Object.keys(BROWSERS).join(", ")}). ${UNDRIVABLE_BROWSERS[systemDefault]?.reason || ""}`.trim(),
+  };
+}
+
+function profileLockError(b) {
+  const version = b.versionUnknown ? " (version could not be read, so it is assumed current)" : b.major ? ` ${b.major}` : "";
+  return `${b.label}${version} does not expose the debug port on your normal profile (Chromium 136 removed that), so it cannot be driven inside your logged-in session. Install or configure another Chromium browser ("browser" in ~/.pi/config/pi-browser-use/config.json), or set "userDataDir" there to drive ${b.label} in a separate automation profile you sign into once.`;
+}
+
+// Which browser is answering on the debug port, or null when nothing is. Identify
+// it from the process that owns the listening socket: with several Chromium
+// browsers running, the port holder is the only honest answer.
+export async function connectedBrowser() {
+  if (!(await cdpUp())) return null;
+  const pids = await sh("lsof", ["-ti", `tcp:${PORT}`, "-sTCP:LISTEN"], 5000);
+  const pid = pids.stdout.trim().split("\n")[0];
+  if (pid) {
+    const ps = await sh("ps", ["-p", pid, "-o", "comm="], 5000);
+    const cmd = ps.stdout.trim();
+    for (const [key, spec] of Object.entries(BROWSERS)) {
+      if (cmd.includes(`/${spec.app}.app/`) || cmd.endsWith(`/${spec.proc}`)) return { key, label: spec.label };
+    }
+    if (cmd) return { key: null, label: cmd.split("/").pop() };
+  }
+  const ver = await httpJson("/json/version", 2000);
+  return { key: null, label: String(ver?.Browser || "a Chromium browser") };
+}
+
+// Config and environment inputs for selection, shared by ensureBrowser and the
+// `browsers` diagnostic so the two can never disagree about what was asked for.
+export function browserSettings({ browser } = {}) {
+  const cfg = loadConfig();
+  const configured = browser || process.env.PI_BROWSER_USE_BROWSER || cfg.browser || null;
+  return {
+    configured,
+    configuredKey: configured ? String(configured).toLowerCase() : null,
+    userDataDir: expandHome(process.env.PI_BROWSER_USE_USER_DATA_DIR || cfg.userDataDir),
+    assumeYes: /^(1|true|yes)$/i.test(process.env.PI_BROWSER_USE_ASSUME_YES || ""),
+  };
+}
+
+// Guarantee a drivable browser is running with the CDP port. No-op when the
+// port is already up. Enabling the port needs a quit+reopen (tabs and logins
+// persist); gate that behind `confirm`.
+export async function ensureBrowser({ confirm, browser } = {}) {
+  const { configured, configuredKey, userDataDir, assumeYes } = browserSettings({ browser });
+
+  // The debug port is one machine-wide resource, so whoever already holds it is what
+  // can be driven; config cannot outrank it without quitting the browser the user is
+  // in. Name the disagreement rather than leaving it to be inferred.
+  const holder = await connectedBrowser();
+  if (holder) {
+    const mismatch = configuredKey && BROWSERS[configuredKey] && holder.key !== configuredKey;
+    return {
+      ok: true,
+      relaunched: false,
+      browser: holder.label,
+      note: mismatch
+        ? `${BROWSERS[configuredKey].label} is configured, but ${holder.label} already holds the debug port; quit ${holder.label} and retry to switch`
+        : undefined,
+    };
+  }
+
+  const [systemDefault, installed] = await Promise.all([systemDefaultBrowser(), detectBrowsers({ userDataDir })]);
+  const choice = chooseBrowser({ configured, systemDefault, installed, userDataDir });
+  if (!choice.ok) return { ok: false, error: choice.error, systemDefault, installed: installed.map((b) => b.key) };
+
+  const picked = installed.find((b) => b.key === choice.key);
+  const spec = BROWSERS[choice.key];
+  const separateProfile = Boolean(picked?.profileLocked && userDataDir);
+  const ps = await sh("pgrep", ["-x", spec.proc]);
+  if (ps.stdout.trim()) {
+    const prompt = separateProfile
+      ? `${spec.label} can only be driven in a separate automation profile. Quit ${spec.label} and reopen it in the profile at ${userDataDir}? That profile has its own tabs and sign-ins, so your current tabs and logins are not carried over.`
+      : `${spec.label} is running without the debug port. Quit and relaunch ${spec.label} to enable browser control? Your tabs${choice.key === "arc" ? ", spaces," : ""} and logins are restored.`;
+    if (confirm) {
+      if (!(await confirm(prompt))) return { ok: false, error: `User declined the ${spec.label} relaunch` };
+    } else if (!assumeYes) {
+      // No way to ask means no consent. Quitting the window the user is working in is
+      // not something to do on silence.
+      return {
+        ok: false,
+        error: `${spec.label} is running without the debug port, and there is no way to ask for your confirmation here. Run the browser "ensure" action in an interactive session, quit ${spec.label} yourself, or start it with --remote-debugging-port=${PORT}. Set PI_BROWSER_USE_ASSUME_YES=1 to allow unattended relaunches.`,
+        browser: spec.label,
+      };
+    }
+    const quit = await sh("osascript", ["-e", `quit app "${spec.app}"`]);
+    await sleep(2500);
+    const still = await sh("pgrep", ["-x", spec.proc]);
+    if (still.stdout.trim()) {
+      const why = quit.stderr.trim() || (quit.code ? `osascript exited ${quit.code}` : "it is still running");
+      return { ok: false, error: `${spec.label} did not quit (${why}), so the debug port could not be enabled. These browsers drop the flag when an instance is already running: close ${spec.label} manually and retry.`, browser: spec.label };
+    }
+  }
+
+  const args = [`--remote-debugging-port=${PORT}`, `--remote-allow-origins=${ORIGIN}`];
+  if (separateProfile) args.push(`--user-data-dir=${userDataDir}`);
+  const opened = await sh("open", ["-na", spec.app, "--args", ...args]);
+  if (opened.code) {
+    return { ok: false, error: `Could not launch ${spec.label}: ${opened.stderr.trim() || `open exited ${opened.code}`}`, browser: spec.label };
+  }
   for (let i = 0; i < 15; i++) {
-    if (await cdpUp()) return { ok: true, relaunched: true };
+    if (await cdpUp()) return { ok: true, relaunched: true, browser: spec.label, note: choice.note };
     await sleep(1000);
   }
-  return { ok: false, error: `Arc did not expose CDP on ${PORT}` };
+  // The browser launched but never opened the port, so the build enforces a
+  // restriction the registry does not know about yet.
+  const hint = userDataDir
+    ? ""
+    : ` If this build is Chromium 136 or later, it only allows debugging in a separate profile: set "userDataDir" in ~/.pi/config/pi-browser-use/config.json.`;
+  return { ok: false, error: `${spec.label} started but did not expose CDP on ${PORT}.${hint}`, browser: spec.label };
 }
 
 // --- Raw CDP connection over the browser websocket --------------------------
