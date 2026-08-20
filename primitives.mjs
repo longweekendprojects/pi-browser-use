@@ -16,13 +16,21 @@ const {
   clearAgentTarget,
   closeTarget,
   cdpUp,
-  ensureArc,
+  ensureBrowser,
+  detectBrowsers,
+  systemDefaultBrowser,
+  chooseBrowser,
+  browserSettings,
+  connectedBrowser,
+  BROWSERS,
+  UNDRIVABLE_BROWSERS,
   redact,
   PORT,
 } = await imp("./helpers.mjs");
 
 export const PRIMITIVES = [
   "ensure",
+  "browsers",
   "navigate",
   "snapshot",
   "read",
@@ -73,8 +81,53 @@ export async function runPrimitive(params, opts = {}) {
   const { action } = params;
 
   if (action === "ensure") {
-    const r = await ensureArc(opts);
-    return { text: r.ok ? `Arc CDP ready on ${PORT}${r.relaunched ? " (relaunched)" : ""}` : `ERROR: ${r.error}`, details: r, isError: !r.ok };
+    const r = await ensureBrowser({ ...opts, browser: params.browser });
+    const label = r.browser || "Browser";
+    const why = r.note ? ` (${r.note})` : "";
+    return {
+      text: r.ok ? `${label} debug port ready on ${PORT}${r.relaunched ? " (relaunched)" : ""}${why}` : `ERROR: ${r.error}`,
+      details: r,
+      isError: !r.ok,
+    };
+  }
+
+  if (action === "browsers") {
+    const { configured, configuredKey, userDataDir } = browserSettings({ browser: params.browser });
+    const [holder, systemDefault, installed] = await Promise.all([
+      connectedBrowser(),
+      systemDefaultBrowser(),
+      detectBrowsers({ userDataDir }),
+    ]);
+    const choice = chooseBrowser({ configured, systemDefault, installed, userDataDir });
+    const defLabel = systemDefault
+      ? BROWSERS[systemDefault]?.label || UNDRIVABLE_BROWSERS[systemDefault]?.label || systemDefault
+      : "could not be determined";
+    const lines = installed.map((b) => {
+      const version = b.versionUnknown ? " (version unreadable)" : b.major ? ` ${b.major}` : "";
+      const state = b.realProfile
+        ? "drivable in your logged-in profile"
+        : b.drivable
+          ? "drivable only in the separate automation profile"
+          : "not drivable (needs a separate profile; set userDataDir)";
+      return `${b.label}${version}: ${state}`;
+    });
+    // ensureBrowser attaches to whoever already holds the port, so lead with that:
+    // the selection below only applies once the port is free.
+    const verdict = choice.ok
+      ? `Would drive on a cold start: ${BROWSERS[choice.key].label}${choice.note ? ` (${choice.note})` : ""}`
+      : `Would fail on a cold start: ${choice.error}`;
+    const live = holder
+      ? `Debug port ${PORT}: held by ${holder.label}, which is what browser actions drive right now.${
+          configuredKey && BROWSERS[configuredKey] && holder.key !== configuredKey
+            ? ` ${BROWSERS[configuredKey].label} is configured, so quit ${holder.label} and retry to switch.`
+            : ""
+        }`
+      : `Debug port ${PORT}: free, so the next browser action launches the browser below.`;
+    return {
+      text: [live, ``, `Default browser: ${defLabel}`, `Configured: ${configured || "(none)"}`, ``, ...lines, ``, verdict].join("\n"),
+      details: { portHolder: holder, systemDefault, configured, installed, choice },
+      isError: false,
+    };
   }
 
   if (action === "close") {
@@ -89,7 +142,7 @@ export async function runPrimitive(params, opts = {}) {
     }
     if (!(await cdpUp())) {
       return {
-        text: "ERROR: Arc browser control is not connected. The tab was left open; `close` will not relaunch Arc.",
+        text: "ERROR: browser control is not connected. The tab was left open; `close` will not relaunch the browser.",
         details: { cdpUnavailable: true },
         isError: true,
       };
@@ -99,7 +152,7 @@ export async function runPrimitive(params, opts = {}) {
         const targets = await listTargets();
         if (targets.some((t) => t.id === saved.id)) {
           const result = await closeTarget(cdp, saved.id);
-          if (result?.success === false) throw new Error("Arc refused to close the agent-created tab");
+          if (result?.success === false) throw new Error("The browser refused to close the agent-created tab");
         }
         clearAgentTarget();
         return { text: "CLOSED agent-created tab.", details: { targetId: saved.id } };
@@ -109,7 +162,7 @@ export async function runPrimitive(params, opts = {}) {
     }
   }
 
-  const ens = await ensureArc(opts);
+  const ens = await ensureBrowser(opts);
   if (!ens.ok) return { text: `ERROR: ${ens.error}`, details: ens, isError: true };
 
   try {

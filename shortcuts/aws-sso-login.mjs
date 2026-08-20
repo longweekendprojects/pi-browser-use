@@ -16,7 +16,7 @@
 
 const Q = new URL(import.meta.url).search;
 const imp = (rel) => import(new URL(rel, import.meta.url).href + Q);
-const { sh, spawnCapture, ensureArc, withConnection, createPage, closeTarget, acceptCookieBanner, loadConfig, sleep } =
+const { sh, spawnCapture, ensureBrowser, withConnection, createPage, closeTarget, acceptCookieBanner, loadConfig, sleep } =
   await imp("../helpers.mjs");
 
 export const meta = {
@@ -65,9 +65,10 @@ export async function run(params, opts = {}) {
     if (who) return { text: `Already authenticated as ${who.Arn} (profile ${profile}).`, details: { profile, arn: who.Arn, skipped: true } };
   }
 
-  // 2. Arc must be up with the debug port.
-  const ens = await ensureArc(opts);
+  // 2. The browser must be up with the debug port.
+  const ens = await ensureBrowser(opts);
   if (!ens.ok) return { text: `ERROR: ${ens.error}`, details: ens, isError: true };
+  const browserLabel = ens.browser || "the browser";
 
   // 3. Start login, capture the authorization URL.
   note(`Starting aws sso login (profile ${profile})...`);
@@ -123,7 +124,7 @@ export async function run(params, opts = {}) {
           } else if (/signin\/v2|pwd|challenge|password|rejected/i.test(cur)) {
             if (!needPassword) {
               needPassword = true;
-              note("Google is asking for a password or 2FA. Please complete it in Arc; I'll keep watching for the callback.");
+              note(`Google is asking for a password or 2FA. Please complete it in ${browserLabel}; I'll keep watching for the callback.`);
             }
           } else if (selected) {
             await page.clickTextRegex("^(continue|allow|confirm|next)$").catch(() => {});
@@ -143,7 +144,7 @@ export async function run(params, opts = {}) {
         if (who) {
           result = { text: `Logged in. ${who.Arn} (profile ${profile}).`, details: { profile, arn: who.Arn, account } };
         } else {
-          result = { text: `Login did not complete (exit ${code}). The browser may need a password or 2FA; complete it in Arc and retry.`, details: { profile, exit: code, output: login.getOutput().slice(-400) }, isError: true };
+          result = { text: `Login did not complete (exit ${code}). The browser may need a password or 2FA; complete it in ${browserLabel} and retry.`, details: { profile, exit: code, output: login.getOutput().slice(-400) }, isError: true };
         }
       }
     } catch (e) {

@@ -1,13 +1,14 @@
 {
   "name": "pi-browser-use",
-  "version": "0.1.2",
-  "description": "Native pi tool that drives your real, logged-in Arc browser over CDP, with a library of hardened multi-step shortcuts.",
+  "version": "0.1.3",
+  "description": "Native pi tool that drives your real, logged-in Chromium browser (Arc, Chrome, Edge, Brave, ...) over CDP, with a library of hardened multi-step shortcuts.",
   "license": "MIT",
   "keywords": [
     "pi",
     "pi-extension",
     "browser-automation",
     "arc",
+    "chrome",
     "chrome-devtools-protocol",
     "cdp",
     "playwright"
