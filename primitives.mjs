@@ -92,7 +92,7 @@ export async function runPrimitive(params, opts = {}) {
   }
 
   if (action === "browsers") {
-    const { configured, configuredKey, userDataDir } = browserSettings({ browser: params.browser });
+    const { configured, configuredKey, userDataDir, assumeYes } = browserSettings({ browser: params.browser });
     const [holder, systemDefault, installed] = await Promise.all([
       connectedBrowser(),
       systemDefaultBrowser(),
@@ -124,7 +124,17 @@ export async function runPrimitive(params, opts = {}) {
         }`
       : `Debug port ${PORT}: free, so the next browser action launches the browser below.`;
     return {
-      text: [live, ``, `Default browser: ${defLabel}`, `Configured: ${configured || "(none)"}`, ``, ...lines, ``, verdict].join("\n"),
+      text: [
+        live,
+        ``,
+        `Default browser: ${defLabel}`,
+        `Configured: ${configured || "(none)"}`,
+        `Relaunch consent: ${assumeYes ? "pre-approved, so no yes/no prompt" : 'asks first (set "autoApproveRelaunch": true in config to skip)'}`,
+        ``,
+        ...lines,
+        ``,
+        verdict,
+      ].join("\n"),
       details: { portHolder: holder, systemDefault, configured, installed, choice },
       isError: false,
     };

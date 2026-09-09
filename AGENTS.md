@@ -52,4 +52,4 @@ Reproduce jiti behavior with `createJiti` from pi's own `node_modules`, not a ba
 
 - Nothing user-specific in the repo. Account email and profile live in `~/.pi/config/pi-browser-use/config.json`; ship a generic `config.example.json`.
 - Redact secrets from any new model-visible output (extend the table in `helpers.mjs`).
-- Anything that quits or relaunches the user's browser must go through the `confirm` consent gate.
+- Anything that quits or relaunches the user's browser must go through the `confirm` consent gate, or the standing consent the user granted with `autoApproveRelaunch` / `PI_BROWSER_USE_ASSUME_YES`. Nothing else may skip the gate.

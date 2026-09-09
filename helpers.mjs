@@ -271,7 +271,11 @@ export function browserSettings({ browser } = {}) {
     configured,
     configuredKey: configured ? String(configured).toLowerCase() : null,
     userDataDir: expandHome(process.env.PI_BROWSER_USE_USER_DATA_DIR || cfg.userDataDir),
-    assumeYes: /^(1|true|yes)$/i.test(process.env.PI_BROWSER_USE_ASSUME_YES || ""),
+    // Standing consent for the quit-and-relaunch, so an agent is not stopped by a
+    // yes/no prompt mid-task. Env wins over config; config is the durable opt-in.
+    assumeYes: process.env.PI_BROWSER_USE_ASSUME_YES
+      ? /^(1|true|yes)$/i.test(process.env.PI_BROWSER_USE_ASSUME_YES)
+      : cfg.autoApproveRelaunch === true,
   };
 }
 
@@ -309,14 +313,16 @@ export async function ensureBrowser({ confirm, browser } = {}) {
     const prompt = separateProfile
       ? `${spec.label} can only be driven in a separate automation profile. Quit ${spec.label} and reopen it in the profile at ${userDataDir}? That profile has its own tabs and sign-ins, so your current tabs and logins are not carried over.`
       : `${spec.label} is running without the debug port. Quit and relaunch ${spec.label} to enable browser control? Your tabs${choice.key === "arc" ? ", spaces," : ""} and logins are restored.`;
-    if (confirm) {
+    if (assumeYes) {
+      // Consent was given ahead of time, so do not stop to ask again.
+    } else if (confirm) {
       if (!(await confirm(prompt))) return { ok: false, error: `User declined the ${spec.label} relaunch` };
-    } else if (!assumeYes) {
+    } else {
       // No way to ask means no consent. Quitting the window the user is working in is
       // not something to do on silence.
       return {
         ok: false,
-        error: `${spec.label} is running without the debug port, and there is no way to ask for your confirmation here. Run the browser "ensure" action in an interactive session, quit ${spec.label} yourself, or start it with --remote-debugging-port=${PORT}. Set PI_BROWSER_USE_ASSUME_YES=1 to allow unattended relaunches.`,
+        error: `${spec.label} is running without the debug port, and there is no way to ask for your confirmation here. Run the browser "ensure" action in an interactive session, quit ${spec.label} yourself, or start it with --remote-debugging-port=${PORT}. Set "autoApproveRelaunch": true in ~/.pi/config/pi-browser-use/config.json (or PI_BROWSER_USE_ASSUME_YES=1) to allow unattended relaunches.`,
         browser: spec.label,
       };
     }

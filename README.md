@@ -36,7 +36,9 @@ Selection order:
 3. Your macOS default browser, when it can be driven inside your logged-in profile.
 4. Otherwise the first installed Chromium browser that can, with a note explaining why your default was passed over.
 
-Enabling the debug port on an already-running browser means quitting and reopening it, so the tool asks first. When there is no way to ask (a non-interactive session), it refuses and explains rather than closing the window you are working in; set `PI_BROWSER_USE_ASSUME_YES=1` to allow unattended relaunches.
+Enabling the debug port on an already-running browser means quitting and reopening it, so the tool asks first. When there is no way to ask (a non-interactive session), it refuses and explains rather than closing the window you are working in.
+
+That one-time yes/no prompt stops an agent mid-task, so you can grant the consent in advance: set `"autoApproveRelaunch": true` in `~/.pi/config/pi-browser-use/config.json` (or `PI_BROWSER_USE_ASSUME_YES=1` for a single shell) and the tool quits and relaunches the browser on its own, in interactive and unattended sessions alike. Your tabs and logins are still restored; the only case where they are not is the separate automation profile, which you opt into by setting `userDataDir`. `browsers` reports which mode is in effect.
 
 Two browser limits shape that order, and both produce a specific message rather than a connection timeout:
 
