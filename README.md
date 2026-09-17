@@ -73,6 +73,8 @@ Two browser limits shape that order, and both produce a specific message rather 
 
 | Shortcut | What it does |
 |---|---|
+Tab ownership: the agent acts only on a tab it opened. That record is keyed by pi session and by browser launch, so a second session never inherits the first session's tab, and a record that outlives the browser is discarded rather than resolved against whatever tab now holds that id. `tab` hands one of your tabs over to the session that asked; `navigate` will not move a handed-over tab off the page you had open without confirming, and falls back to a fresh agent tab when it cannot ask. `close` closes only a tab the session itself created.
+
 | `aws-sso-login` | Refresh expired AWS SSO credentials end to end, including driving the identity-provider account chooser. Idempotent: skips if the token is still valid. |
 | `wait-for` | Block until the active tab matches a URL substring, visible text, or selector. Replaces blind sleeps. |
 

@@ -572,9 +572,18 @@ async function attach(cdp, targetId) {
 
 const STATE_FILE = join(homedir(), ".pi", "state", "pi-browser-use.json");
 
+// One tab record per pi session, bound to one browser instance. Both keys matter:
+// a session-global record let one agent's tab (or a tab the user handed to one
+// agent) become another agent's target, and a record that outlived the browser
+// could point at a target id the browser later handed to a tab the user opened.
+function sessionKey() {
+  return process.env.PI_BROWSER_USE_SESSION || process.env.PI_SESSION_ID || process.env.PI_INTERCOM_SESSION_ID || "default";
+}
+
 function readState() {
   try {
-    return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    const raw = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    return raw && typeof raw === "object" ? raw : {};
   } catch {
     return {};
   }
@@ -588,19 +597,31 @@ function writeState(s) {
   }
 }
 
-export function setAgentTarget(id, ownership) {
-  writeState({ agentTargetId: id, agentTargetOwnership: ownership });
+// The browser's own CDP GUID changes on every launch, so it identifies the
+// instance a recorded tab belongs to.
+export async function browserInstanceId() {
+  const ver = await httpJson("/json/version", 2000);
+  const ws = ver?.webSocketDebuggerUrl || "";
+  return ws.split("/").pop() || null;
+}
+
+export function setAgentTarget(id, ownership, browserId = null) {
+  const state = readState();
+  const sessions = { ...(state.sessions || {}) };
+  sessions[sessionKey()] = { targetId: id, ownership, browserId, at: Date.now() };
+  writeState({ sessions });
 }
 export function clearAgentTarget() {
-  writeState({});
+  const state = readState();
+  const sessions = { ...(state.sessions || {}) };
+  delete sessions[sessionKey()];
+  writeState({ sessions });
 }
 export function getAgentTarget() {
-  const state = readState();
-  if (!state.agentTargetId) return null;
-  const ownership = state.agentTargetOwnership === "created" || state.agentTargetOwnership === "adopted"
-    ? state.agentTargetOwnership
-    : "unknown";
-  return { id: state.agentTargetId, ownership };
+  const entry = readState().sessions?.[sessionKey()];
+  if (!entry?.targetId) return null;
+  const ownership = entry.ownership === "created" || entry.ownership === "adopted" ? entry.ownership : "unknown";
+  return { id: entry.targetId, ownership, browserId: entry.browserId || null, at: entry.at || 0 };
 }
 export function getAgentTargetId() {
   return getAgentTarget()?.id || null;
@@ -609,14 +630,33 @@ export function canCloseAgentTarget(target) {
   return target?.ownership === "created";
 }
 
+// A recorded tab is usable only when this session recorded it, the browser is
+// still the instance it was recorded against, the tab is still open, and the
+// ownership is one we wrote deliberately. Anything else is treated as gone,
+// which makes the agent open its own tab rather than act on a stranger's.
+export function agentTargetIsUsable(saved, targets, browserId) {
+  if (!saved) return false;
+  if (saved.ownership === "unknown") return false;
+  if (saved.browserId && browserId && saved.browserId !== browserId) return false;
+  if (!saved.browserId) return false;
+  return targets.some((t) => t.id === saved.id);
+}
+
 // Run fn against the agent's own tab. With create=true, opens a fresh tab when
 // none is owned (used by navigate) so the agent never grabs a user tab. With
 // create=false, returns an instructive error when no agent tab exists.
-export async function withAgentPage(fn, { create = false } = {}) {
+export async function withAgentPage(fn, { create = false, onAdopted = null } = {}) {
   return withConnection(async (cdp) => {
-    const targets = await listTargets();
+    const [targets, browserId] = await Promise.all([listTargets(), browserInstanceId()]);
     const saved = getAgentTarget();
-    let targetId = saved?.id && targets.some((t) => t.id === saved.id) ? saved.id : null;
+    const usable = agentTargetIsUsable(saved, targets, browserId);
+    if (saved && !usable) clearAgentTarget();
+    let targetId = usable ? saved.id : null;
+    if (targetId && saved.ownership === "adopted" && onAdopted) {
+      const current = targets.find((t) => t.id === targetId);
+      const decision = await onAdopted({ url: current?.url || "", title: current?.title || "" });
+      if (decision === "new-tab") targetId = null;
+    }
     if (!targetId) {
       if (!create) {
         return {
@@ -627,7 +667,7 @@ export async function withAgentPage(fn, { create = false } = {}) {
       }
       const { targetId: newId } = await cdp.send("Target.createTarget", { url: "about:blank" });
       targetId = newId;
-      setAgentTarget(targetId, "created");
+      setAgentTarget(targetId, "created", browserId);
       await sleep(150);
     }
     const page = await attach(cdp, targetId);
