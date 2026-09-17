@@ -682,6 +682,71 @@ export async function acceptCookieBanner(page) {
   }
 }
 
+// --- AWS profile chain -----------------------------------------------------
+// Only a profile that carries its own SSO configuration can run `aws sso login`.
+// A role-assumption profile (`role_arn` + `source_profile`) borrows credentials
+// from another profile, so logging it in means logging in the profile it chains
+// from. Parsing the config here keeps the shortcut from handing `aws sso login` a
+// profile the CLI will always reject.
+export function parseAwsConfig(text) {
+  const profiles = {};
+  let current = null;
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.replace(/\s+[#;].*$/, "").replace(/^\s*[#;].*$/, "").trim();
+    if (!line) continue;
+    const header = line.match(/^\[([^\]]+)\]$/);
+    if (header) {
+      const name = header[1].trim();
+      const withPrefix = name.match(/^profile\s+(.+)$/);
+      if (/^sso-session\s+/.test(name)) {
+        current = null;
+      } else {
+        current = withPrefix ? withPrefix[1].trim() : name;
+        profiles[current] ||= {};
+      }
+      continue;
+    }
+    if (!current) continue;
+    const kv = line.match(/^([^=]+)=(.*)$/);
+    if (kv) profiles[current][kv[1].trim()] = kv[2].trim();
+  }
+  return profiles;
+}
+
+export function readAwsConfig() {
+  const path = process.env.AWS_CONFIG_FILE || join(homedir(), ".aws", "config");
+  try {
+    return parseAwsConfig(readFileSync(path, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+// Follow `source_profile` until a profile with SSO settings appears. Returns the
+// profile to log in with, the chain that was walked, and a reason when there is none.
+export function resolveSsoProfile(profile, profiles = readAwsConfig()) {
+  const chain = [];
+  let name = profile;
+  while (name) {
+    if (chain.includes(name)) return { ok: false, chain, error: `the source_profile chain for ${profile} loops back on itself` };
+    chain.push(name);
+    const entry = profiles[name];
+    if (!entry) {
+      // An unreadable or minimal config is not evidence against the profile; let
+      // the AWS CLI be the judge, exactly as before.
+      if (chain.length === 1) return { ok: true, profile: name, chain, unverified: true };
+      return { ok: false, chain, error: `profile ${name} is used as source_profile but is not defined in the AWS config` };
+    }
+    if (entry.sso_session || entry.sso_start_url) return { ok: true, profile: name, chain };
+    if (entry.source_profile) {
+      name = entry.source_profile;
+      continue;
+    }
+    return { ok: false, chain, error: `profile ${profile} has no SSO configuration, and no source_profile to inherit one from` };
+  }
+  return { ok: false, chain, error: `profile ${profile} has no SSO configuration` };
+}
+
 // Config: global file, optional env override.
 export function loadConfig() {
   const paths = [

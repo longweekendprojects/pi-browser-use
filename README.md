@@ -101,7 +101,7 @@ Two optional keys control the browser, and browser detection works without eithe
 - `"browser"` pins which browser to drive (`arc`, `dia`, `chrome`, `edge`, `brave`, `vivaldi`, `chromium`, `opera`). Omit it to follow your default browser.
 - `"userDataDir"` (for example `"~/.pi/state/pi-browser-use/profile"`) is the separate automation profile used for browsers that refuse debugging on the normal profile, and is ignored for browsers that do not need it.
 
-Both have environment overrides (`PI_BROWSER_USE_BROWSER`, `PI_BROWSER_USE_USER_DATA_DIR`), and the file path itself is overridable with `PI_BROWSER_USE_CONFIG`. For `aws-sso-login`, the account resolves from `account` param, then config `aws.ssoAccountEmail`; if neither is set and the chooser offers multiple accounts, the shortcut lists them and asks instead of guessing.
+Both have environment overrides (`PI_BROWSER_USE_BROWSER`, `PI_BROWSER_USE_USER_DATA_DIR`), and the file path itself is overridable with `PI_BROWSER_USE_CONFIG`. For `aws-sso-login`, the account resolves from `account` param, then config `aws.ssoAccountEmail`; if neither is set and the chooser offers multiple accounts, the shortcut lists them and asks instead of guessing. The `profile` param is the profile you want credentials for; when it is a role-assumption profile (`role_arn` + `source_profile`), the login runs against the profile it chains from, since only that one owns an SSO session.
 
 ## Architecture
 
