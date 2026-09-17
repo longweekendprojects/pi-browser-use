@@ -73,6 +73,8 @@ Two browser limits shape that order, and both produce a specific message rather 
 
 | Shortcut | What it does |
 |---|---|
+Tab ownership: the agent acts only on a tab it opened. That record is keyed by pi session and by browser launch, so a second session never inherits the first session's tab, and a record that outlives the browser is discarded rather than resolved against whatever tab now holds that id. `tab` hands one of your tabs over to the session that asked; `navigate` will not move a handed-over tab off the page you had open without confirming, and falls back to a fresh agent tab when it cannot ask. `close` closes only a tab the session itself created.
+
 | `aws-sso-login` | Refresh expired AWS SSO credentials end to end, including driving the identity-provider account chooser. Idempotent: skips if the token is still valid. |
 | `wait-for` | Block until the active tab matches a URL substring, visible text, or selector. Replaces blind sleeps. |
 
@@ -101,7 +103,7 @@ Two optional keys control the browser, and browser detection works without eithe
 - `"browser"` pins which browser to drive (`arc`, `dia`, `chrome`, `edge`, `brave`, `vivaldi`, `chromium`, `opera`). Omit it to follow your default browser.
 - `"userDataDir"` (for example `"~/.pi/state/pi-browser-use/profile"`) is the separate automation profile used for browsers that refuse debugging on the normal profile, and is ignored for browsers that do not need it.
 
-Both have environment overrides (`PI_BROWSER_USE_BROWSER`, `PI_BROWSER_USE_USER_DATA_DIR`), and the file path itself is overridable with `PI_BROWSER_USE_CONFIG`. For `aws-sso-login`, the account resolves from `account` param, then config `aws.ssoAccountEmail`; if neither is set and the chooser offers multiple accounts, the shortcut lists them and asks instead of guessing.
+Both have environment overrides (`PI_BROWSER_USE_BROWSER`, `PI_BROWSER_USE_USER_DATA_DIR`), and the file path itself is overridable with `PI_BROWSER_USE_CONFIG`. For `aws-sso-login`, the account resolves from `account` param, then config `aws.ssoAccountEmail`; if neither is set and the chooser offers multiple accounts, the shortcut lists them and asks instead of guessing. The `profile` param is the profile you want credentials for; when it is a role-assumption profile (`role_arn` + `source_profile`), the login runs against the profile it chains from, since only that one owns an SSO session.
 
 ## Architecture
 

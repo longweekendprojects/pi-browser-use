@@ -9,6 +9,10 @@
 //   4. on the IdP account chooser, pick the configured account (never hardcoded)
 //   5. confirm the CLI callback fired and verify with get-caller-identity
 //
+// The requested profile and the profile that logs in are not always the same: a
+// role-assumption profile has no SSO session of its own, so the login follows
+// `source_profile` and the verification stays on what was asked for.
+//
 // Transport is raw CDP (single tab), so it stays reliable even when the user's
 // browser has many tabs open. The account is chosen from params.account or
 // config.aws.ssoAccountEmail; if neither is set, it returns the accounts found
@@ -16,7 +20,7 @@
 
 const Q = new URL(import.meta.url).search;
 const imp = (rel) => import(new URL(rel, import.meta.url).href + Q);
-const { sh, spawnCapture, ensureBrowser, withConnection, createPage, closeTarget, acceptCookieBanner, loadConfig, sleep } =
+const { sh, spawnCapture, ensureBrowser, withConnection, createPage, closeTarget, acceptCookieBanner, loadConfig, resolveSsoProfile, sleep } =
   await imp("../helpers.mjs");
 
 export const meta = {
@@ -70,13 +74,22 @@ export async function run(params, opts = {}) {
   if (!ens.ok) return { text: `ERROR: ${ens.error}`, details: ens, isError: true };
   const browserLabel = ens.browser || "the browser";
 
-  // 3. Start login, capture the authorization URL.
-  note(`Starting aws sso login (profile ${profile})...`);
-  const login = spawnCapture("aws", ["sso", "login", "--profile", profile, "--no-browser"], /https:\/\/oidc[^\s]+/, 15000);
+  // 3. Start login on the profile that actually owns an SSO session. A role
+  //    assumption profile (role_arn + source_profile) cannot log in itself.
+  const resolved = resolveSsoProfile(profile);
+  if (!resolved.ok) {
+    return { text: `ERROR: ${resolved.error}. Name a profile that has an sso_session (or sso_start_url) in ~/.aws/config.`, details: { profile, chain: resolved.chain }, isError: true };
+  }
+  const loginProfile = resolved.profile;
+  if (loginProfile !== profile) note(`${profile} assumes a role through ${loginProfile}; logging in ${loginProfile}.`);
+  note(`Starting aws sso login (profile ${loginProfile})...`);
+  const login = spawnCapture("aws", ["sso", "login", "--profile", loginProfile, "--no-browser"], /https:\/\/oidc[^\s]+/, 15000);
   const url = await login.match;
   if (!url) {
     login.child.kill();
-    return { text: "ERROR: did not receive an authorization URL from aws sso login", details: { output: login.getOutput().slice(0, 500) }, isError: true };
+    const output = login.getOutput().trim();
+    const reason = output.split("\n").find((l) => /error/i.test(l)) || output.slice(0, 200) || "no output";
+    return { text: `ERROR: aws sso login (profile ${loginProfile}) produced no authorization URL: ${reason}`, details: { profile, loginProfile, output: output.slice(0, 500) }, isError: true };
   }
 
   // 4. Drive a dedicated tab through the redirect chain.
@@ -142,9 +155,9 @@ export async function run(params, opts = {}) {
         const code = await Promise.race([login.exited, sleep(8000).then(() => "timeout")]);
         const who = await callerIdentity(profile);
         if (who) {
-          result = { text: `Logged in. ${who.Arn} (profile ${profile}).`, details: { profile, arn: who.Arn, account } };
+          result = { text: `Logged in. ${who.Arn} (profile ${profile}${loginProfile !== profile ? `, via ${loginProfile}` : ""}).`, details: { profile, loginProfile, arn: who.Arn, account } };
         } else {
-          result = { text: `Login did not complete (exit ${code}). The browser may need a password or 2FA; complete it in ${browserLabel} and retry.`, details: { profile, exit: code, output: login.getOutput().slice(-400) }, isError: true };
+          result = { text: `Login did not complete (exit ${code}). The browser may need a password or 2FA; complete it in ${browserLabel} and retry.`, details: { profile, loginProfile, exit: code, output: login.getOutput().slice(-400) }, isError: true };
         }
       }
     } catch (e) {

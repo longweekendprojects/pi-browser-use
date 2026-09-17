@@ -572,9 +572,18 @@ async function attach(cdp, targetId) {
 
 const STATE_FILE = join(homedir(), ".pi", "state", "pi-browser-use.json");
 
+// One tab record per pi session, bound to one browser instance. Both keys matter:
+// a session-global record let one agent's tab (or a tab the user handed to one
+// agent) become another agent's target, and a record that outlived the browser
+// could point at a target id the browser later handed to a tab the user opened.
+function sessionKey() {
+  return process.env.PI_BROWSER_USE_SESSION || process.env.PI_SESSION_ID || process.env.PI_INTERCOM_SESSION_ID || "default";
+}
+
 function readState() {
   try {
-    return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    const raw = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    return raw && typeof raw === "object" ? raw : {};
   } catch {
     return {};
   }
@@ -588,19 +597,31 @@ function writeState(s) {
   }
 }
 
-export function setAgentTarget(id, ownership) {
-  writeState({ agentTargetId: id, agentTargetOwnership: ownership });
+// The browser's own CDP GUID changes on every launch, so it identifies the
+// instance a recorded tab belongs to.
+export async function browserInstanceId() {
+  const ver = await httpJson("/json/version", 2000);
+  const ws = ver?.webSocketDebuggerUrl || "";
+  return ws.split("/").pop() || null;
+}
+
+export function setAgentTarget(id, ownership, browserId = null) {
+  const state = readState();
+  const sessions = { ...(state.sessions || {}) };
+  sessions[sessionKey()] = { targetId: id, ownership, browserId, at: Date.now() };
+  writeState({ sessions });
 }
 export function clearAgentTarget() {
-  writeState({});
+  const state = readState();
+  const sessions = { ...(state.sessions || {}) };
+  delete sessions[sessionKey()];
+  writeState({ sessions });
 }
 export function getAgentTarget() {
-  const state = readState();
-  if (!state.agentTargetId) return null;
-  const ownership = state.agentTargetOwnership === "created" || state.agentTargetOwnership === "adopted"
-    ? state.agentTargetOwnership
-    : "unknown";
-  return { id: state.agentTargetId, ownership };
+  const entry = readState().sessions?.[sessionKey()];
+  if (!entry?.targetId) return null;
+  const ownership = entry.ownership === "created" || entry.ownership === "adopted" ? entry.ownership : "unknown";
+  return { id: entry.targetId, ownership, browserId: entry.browserId || null, at: entry.at || 0 };
 }
 export function getAgentTargetId() {
   return getAgentTarget()?.id || null;
@@ -609,14 +630,33 @@ export function canCloseAgentTarget(target) {
   return target?.ownership === "created";
 }
 
+// A recorded tab is usable only when this session recorded it, the browser is
+// still the instance it was recorded against, the tab is still open, and the
+// ownership is one we wrote deliberately. Anything else is treated as gone,
+// which makes the agent open its own tab rather than act on a stranger's.
+export function agentTargetIsUsable(saved, targets, browserId) {
+  if (!saved) return false;
+  if (saved.ownership === "unknown") return false;
+  if (saved.browserId && browserId && saved.browserId !== browserId) return false;
+  if (!saved.browserId) return false;
+  return targets.some((t) => t.id === saved.id);
+}
+
 // Run fn against the agent's own tab. With create=true, opens a fresh tab when
 // none is owned (used by navigate) so the agent never grabs a user tab. With
 // create=false, returns an instructive error when no agent tab exists.
-export async function withAgentPage(fn, { create = false } = {}) {
+export async function withAgentPage(fn, { create = false, onAdopted = null } = {}) {
   return withConnection(async (cdp) => {
-    const targets = await listTargets();
+    const [targets, browserId] = await Promise.all([listTargets(), browserInstanceId()]);
     const saved = getAgentTarget();
-    let targetId = saved?.id && targets.some((t) => t.id === saved.id) ? saved.id : null;
+    const usable = agentTargetIsUsable(saved, targets, browserId);
+    if (saved && !usable) clearAgentTarget();
+    let targetId = usable ? saved.id : null;
+    if (targetId && saved.ownership === "adopted" && onAdopted) {
+      const current = targets.find((t) => t.id === targetId);
+      const decision = await onAdopted({ url: current?.url || "", title: current?.title || "" });
+      if (decision === "new-tab") targetId = null;
+    }
     if (!targetId) {
       if (!create) {
         return {
@@ -627,7 +667,7 @@ export async function withAgentPage(fn, { create = false } = {}) {
       }
       const { targetId: newId } = await cdp.send("Target.createTarget", { url: "about:blank" });
       targetId = newId;
-      setAgentTarget(targetId, "created");
+      setAgentTarget(targetId, "created", browserId);
       await sleep(150);
     }
     const page = await attach(cdp, targetId);
@@ -680,6 +720,71 @@ export async function acceptCookieBanner(page) {
   } catch {
     return null;
   }
+}
+
+// --- AWS profile chain -----------------------------------------------------
+// Only a profile that carries its own SSO configuration can run `aws sso login`.
+// A role-assumption profile (`role_arn` + `source_profile`) borrows credentials
+// from another profile, so logging it in means logging in the profile it chains
+// from. Parsing the config here keeps the shortcut from handing `aws sso login` a
+// profile the CLI will always reject.
+export function parseAwsConfig(text) {
+  const profiles = {};
+  let current = null;
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.replace(/\s+[#;].*$/, "").replace(/^\s*[#;].*$/, "").trim();
+    if (!line) continue;
+    const header = line.match(/^\[([^\]]+)\]$/);
+    if (header) {
+      const name = header[1].trim();
+      const withPrefix = name.match(/^profile\s+(.+)$/);
+      if (/^sso-session\s+/.test(name)) {
+        current = null;
+      } else {
+        current = withPrefix ? withPrefix[1].trim() : name;
+        profiles[current] ||= {};
+      }
+      continue;
+    }
+    if (!current) continue;
+    const kv = line.match(/^([^=]+)=(.*)$/);
+    if (kv) profiles[current][kv[1].trim()] = kv[2].trim();
+  }
+  return profiles;
+}
+
+export function readAwsConfig() {
+  const path = process.env.AWS_CONFIG_FILE || join(homedir(), ".aws", "config");
+  try {
+    return parseAwsConfig(readFileSync(path, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+// Follow `source_profile` until a profile with SSO settings appears. Returns the
+// profile to log in with, the chain that was walked, and a reason when there is none.
+export function resolveSsoProfile(profile, profiles = readAwsConfig()) {
+  const chain = [];
+  let name = profile;
+  while (name) {
+    if (chain.includes(name)) return { ok: false, chain, error: `the source_profile chain for ${profile} loops back on itself` };
+    chain.push(name);
+    const entry = profiles[name];
+    if (!entry) {
+      // An unreadable or minimal config is not evidence against the profile; let
+      // the AWS CLI be the judge, exactly as before.
+      if (chain.length === 1) return { ok: true, profile: name, chain, unverified: true };
+      return { ok: false, chain, error: `profile ${name} is used as source_profile but is not defined in the AWS config` };
+    }
+    if (entry.sso_session || entry.sso_start_url) return { ok: true, profile: name, chain };
+    if (entry.source_profile) {
+      name = entry.source_profile;
+      continue;
+    }
+    return { ok: false, chain, error: `profile ${profile} has no SSO configuration, and no source_profile to inherit one from` };
+  }
+  return { ok: false, chain, error: `profile ${profile} has no SSO configuration` };
 }
 
 // Config: global file, optional env override.

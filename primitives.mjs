@@ -12,6 +12,8 @@ const {
   listTargets,
   getAgentTarget,
   canCloseAgentTarget,
+  agentTargetIsUsable,
+  browserInstanceId,
   setAgentTarget,
   clearAgentTarget,
   closeTarget,
@@ -159,7 +161,11 @@ export async function runPrimitive(params, opts = {}) {
     }
     try {
       return await withConnection(async (cdp) => {
-        const targets = await listTargets();
+        const [targets, browserId] = await Promise.all([listTargets(), browserInstanceId()]);
+        if (!agentTargetIsUsable(saved, targets, browserId)) {
+          clearAgentTarget();
+          return { text: "Nothing to close: the recorded agent tab is gone or belongs to a previous browser session.", details: { stale: true } };
+        }
         if (targets.some((t) => t.id === saved.id)) {
           const result = await closeTarget(cdp, saved.id);
           if (result?.success === false) throw new Error("The browser refused to close the agent-created tab");
@@ -177,11 +183,27 @@ export async function runPrimitive(params, opts = {}) {
 
   try {
     switch (action) {
-      case "navigate":
-        return await withAgentPage(async (page) => {
+      case "navigate": {
+        // An adopted tab is the user's. Leaving the page they had open is their
+        // call, so ask; with no way to ask, open the agent's own tab instead.
+        let movedOff = null;
+        const onAdopted = async ({ url, title }) => {
+          const ask = opts.confirm;
+          const label = title ? `${title} (${url})` : url;
+          if (ask && (await ask(`You handed over the tab showing ${label}. Navigate that tab to ${params.url}? The page you had open will be replaced.`))) return "keep";
+          movedOff = url;
+          return "new-tab";
+        };
+        const r = await withAgentPage(async (page) => {
           const url = await page.navigate(params.url);
           return { text: `OK ${url}`, details: { url } };
-        }, { create: true });
+        }, { create: true, onAdopted });
+        if (movedOff) {
+          r.text += `\n(Opened a new agent tab; left your handed-over tab on ${movedOff} untouched.)`;
+          r.details = { ...(r.details || {}), leftAdoptedTabAlone: movedOff };
+        }
+        return r;
+      }
       case "read":
         return await withAgentPage(async (page) => {
           const url = await page.url();
@@ -224,13 +246,15 @@ export async function runPrimitive(params, opts = {}) {
         });
       case "tabs":
         return await withConnection(async () => {
-          const targets = await listTargets();
+          const [targets, browserId] = await Promise.all([listTargets(), browserInstanceId()]);
           const saved = getAgentTarget();
+          const usable = agentTargetIsUsable(saved, targets, browserId);
+          const label = saved?.ownership === "created" ? "agent tab (this session)" : "tab you handed over (this session)";
           const lines = targets.map((t, i) => {
-            const label = saved?.ownership === "created" ? "agent tab" : saved?.ownership === "adopted" ? "adopted tab" : "legacy tab (ownership unknown)";
-            const marker = t.id === saved?.id ? `  <- ${label}` : "";
+            const marker = usable && t.id === saved.id ? `  <- ${label}` : "";
             return `[${i}] ${t.title || ""}  ${t.url}${marker}`;
           });
+          if (!usable) lines.push("", "This session has no tab of its own yet; every tab above belongs to you. `navigate` opens a fresh one.");
           return { text: lines.join("\n"), details: { count: targets.length } };
         });
       case "tab":
@@ -240,7 +264,7 @@ export async function runPrimitive(params, opts = {}) {
           if (params.index != null && params.index !== "") target = targets[Number(params.index)];
           else if (params.url) target = targets.find((t) => String(t.url).includes(params.url));
           if (!target) return { text: `No tab matched ${params.index ?? params.url ?? "(nothing given)"}. Use action=tabs to list them.`, details: {}, isError: true };
-          setAgentTarget(target.id, "adopted");
+          setAgentTarget(target.id, "adopted", await browserInstanceId());
           return { text: `Agent now controls: ${target.title || ""}  ${target.url}`, details: { url: target.url } };
         });
       default:
