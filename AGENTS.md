@@ -40,13 +40,14 @@ A fresh process always loads current code, so the harness is great for logic but
 
 ## Hot-reload constraints (do not regress these)
 
-If you touch `index.ts` module loading, preserve all three:
+If you touch `index.ts` module loading, preserve all four:
 
 1. Per-load token (`?v=Date.now()`) on the engine import, propagated by every engine module to its own local imports.
 2. Anchor on `__dirname` for the extension directory, never `import.meta.url` (jiti makes it a `data:` URL).
 3. Load the engine with a runtime-built native import (`Function("u","return import(u)")`), because jiti rewrites a literal `import()` into a cache that ignores the token.
+4. Delete the extension's `.mjs` entries from `require.cache` before that import, because Bun (Pi-Bolt's runtime) caches modules by path and ignores the token.
 
-Reproduce jiti behavior with `createJiti` from pi's own `node_modules`, not a bare node process, or you will not see the caching that bites in production.
+Reproduce jiti behavior with `createJiti` from pi's own `node_modules`, not a bare node process, or you will not see the caching that bites in production. Reproduce Bun behavior with `BUN_BE_BUN=1 <pi-bolt dir>/pi-bin script.mjs`, which runs the bundled Bun without starting an agent. The harness runs under Node, so it never shows Bun staleness.
 
 ## Keep it honest
 

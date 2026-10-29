@@ -74,11 +74,12 @@ The agent acts only on its own dedicated tab, identified by a stable target id (
 
 ## Hot-reload
 
-Editing engine files should take effect on a plain pi `/reload`, no full restart. This required defeating three caches, each a real trap:
+Editing engine files should take effect on a plain pi `/reload`, no full restart. This required defeating four caches, each a real trap:
 
 1. Node's native ESM cache holds `.mjs` across reloads. A per-load token in the import URL (`?v=Date.now()`) busts it, and every engine module propagates the token to its own local imports.
 2. jiti (pi's loader) compiles the extension entry to a `data:` URL, so `import.meta.url` is unusable for locating sibling files. The entry anchors on `__dirname`, which jiti injects as the real directory.
 3. jiti rewrites a literal `import()` into its own cached loader, which ignores the `?v=` query. The entry builds the import at runtime (`Function("u","return import(u)")`) so a true native dynamic import runs and the token actually busts the cache.
+4. Bun, which runs compiled pi builds such as Pi-Bolt, keys its module cache by file path and ignores the `?v=` query. Before importing, the entry deletes this extension's `.mjs` files from the shared `require.cache`, which Bun honors for ES modules. Under Node that cache holds no ES modules, so the step does nothing there.
 
 The net effect: `index.ts` loads `core.mjs?v=<token>` natively, and the token flows through the whole graph, so one `/reload` reloads everything.
 
