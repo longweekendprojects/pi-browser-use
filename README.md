@@ -1,12 +1,12 @@
 # pi-browser-use
 
-A native pi tool that drives your real, logged-in Chromium browser (Arc, Chrome, Edge, Brave, Vivaldi, Chromium, Opera) over the Chrome DevTools Protocol, reusing your tabs, cookies, and logins. It exposes one `browser` tool with two layers: primitive verbs and a growing library of named shortcuts that codify multi-step flows.
+A native pi tool that drives your real, logged-in browser, reusing your tabs, cookies, and logins. It follows your macOS default browser: Firefox over WebDriver BiDi, or a Chromium browser (Arc, Chrome, Edge, Brave, Vivaldi, Chromium, Opera) over the Chrome DevTools Protocol. It exposes one `browser` tool with two layers: primitive verbs and a growing library of named shortcuts that codify multi-step flows.
 
 Unlike headless or vision-based automation, the agent reads the page's live HTML and gets a plain-English list of interactive elements (for example `@e5 button "Sign in"`), then decides what to click or type from that structure, never from a screenshot.
 
 ## Requirements
 
-- macOS with a Chromium-family browser installed (Arc, Chrome, Edge, Brave, Vivaldi, Chromium, or Opera). Safari and Firefox cannot be driven; see [Which browser gets driven](#which-browser-gets-driven).
+- macOS with Firefox (release, Developer Edition, or Nightly) or a Chromium-family browser (Arc, Chrome, Edge, Brave, Vivaldi, Chromium, or Opera). Safari cannot be driven; see [Which browser gets driven](#which-browser-gets-driven).
 - Node.js 22+ (uses the built-in `WebSocket` to talk to the browser; no third-party dependencies)
 - pi (this is a pi extension)
 - AWS CLI v2, only if you use the `aws-sso-login` shortcut
@@ -27,14 +27,15 @@ The browser must run with the debug port. The tool's `ensure` action (and every 
 
 ## Which browser gets driven
 
-The tool picks the browser you actually use, and tells you when it cannot. Run `browsers` to see the decision for your machine: it reports your default browser, the Chromium browsers installed, and which one would be driven.
+The tool picks the browser you actually use, and tells you when it cannot. Run `browsers` to see the decision for your machine: it reports your default browser, the supported browsers installed, and which one would be driven.
 
 Selection order:
 
-1. Whatever already answers on the debug port, because that port is a single machine-wide resource. When it is not the browser you pinned in config, the tool says so and tells you to quit that browser to switch.
-2. The browser named in config (`"browser": "chrome"`) or in `PI_BROWSER_USE_BROWSER`.
-3. Your macOS default browser, when it can be driven inside your logged-in profile.
-4. Otherwise the first installed Chromium browser that can, with a note explaining why your default was passed over.
+1. The browser named in config (`"browser": "firefox"`) or in `PI_BROWSER_USE_BROWSER`.
+2. Your macOS default browser, when it can be driven inside your logged-in profile.
+3. Otherwise the first installed browser that can, with a note explaining why your default was passed over.
+
+Chromium browsers use debug port 9222 and Firefox uses 9223, so a Chromium browser still holding its port does not block Firefox. A port can have only one holder, though: if another Chromium browser already holds 9222 when Chrome is selected, the tool drives that browser and tells you to quit it to switch. The same applies between Firefox builds on 9223.
 
 Enabling the debug port on an already-running browser means quitting and reopening it, so the tool asks first. When there is no way to ask (a non-interactive session), it refuses and explains rather than closing the window you are working in.
 
@@ -42,8 +43,17 @@ That one-time yes/no prompt stops an agent mid-task, so you can grant the consen
 
 Two browser limits shape that order, and both produce a specific message rather than a connection timeout:
 
-- **Safari and Firefox cannot be driven.** Safari does not speak the Chrome DevTools Protocol, and its WebDriver and MCP automation run an isolated session without your cookies or logins, which defeats the purpose of this tool. If Safari is your default browser, the tool falls back to an installed Chromium browser and says so.
+- **Safari cannot be driven.** Safari speaks neither the Chrome DevTools Protocol nor WebDriver BiDi, and its WebDriver and MCP automation run an isolated session without your cookies or logins, which defeats the purpose of this tool. If Safari is your default browser, the tool falls back to another installed browser and says so.
 - **Chrome, Edge, Brave, Vivaldi, and Opera version 136 and later ignore `--remote-debugging-port` on your normal profile.** They can only be driven in a separate `--user-data-dir` profile, which starts out signed into nothing. The tool therefore prefers a browser that keeps your session, and drives such a browser only when you set `userDataDir` in config, opting into an automation profile you sign into once. Chrome, Edge, and Chromium report the Chromium version directly, so an older build is recognized as still drivable; Brave, Vivaldi, and Opera number their releases on their own tracks, so they are assumed to need the separate profile rather than promised a session they may not deliver.
+
+### Firefox
+
+Firefox keeps your logins: it serves WebDriver BiDi on your normal profile. A few things differ from the Chromium browsers:
+
+- Before it relaunches Firefox, the tool sets two prefs in your profile. `remote.prefs.recommended=false` stops Firefox from switching off Safe Browsing, tracking protection, password saving, and add-on updates while the debug port is on. `browser.sessionstore.resume_session_once` brings back the tabs you had open, once.
+- While the debug port is on, Firefox shows its remote-control indicator (striped address bar and robot icon), and pages see `navigator.webdriver` as true.
+- Firefox allows one automation session at a time. A small background `node` process holds it and shares it with every pi session; it exits when Firefox quits.
+- `tabs` lists Firefox tabs by URL only, because reading titles would run script in every tab you have open.
 
 ## Documentation
 
@@ -56,8 +66,8 @@ Two browser limits shape that order, and both produce a specific message rather 
 
 | Action | Purpose |
 |---|---|
-| `ensure` | Guarantee the chosen browser is running with CDP on port 9222 |
-| `browsers` | Report the default browser, the installed Chromium browsers, and which one would be driven |
+| `ensure` | Guarantee the chosen browser is running with its debug port (9222 for Chromium, 9223 for Firefox) |
+| `browsers` | Report the default browser, the installed supported browsers, and which one would be driven |
 | `navigate` | Open a URL in the active tab |
 | `snapshot` | List visible interactive elements with stable `@eN` refs |
 | `read` | Active tab URL, title, and visible text (secrets redacted) |
@@ -82,7 +92,7 @@ A shortcut earns its place only after a real flow proves it is needed and has ru
 
 ## Tab safety guarantee
 
-The agent acts only on its own dedicated tab, tracked by a stable CDP target id that persists across calls. `navigate` opens that tab if it does not exist; it never reuses a tab you opened. Read and action verbs refuse to run when no agent tab exists rather than grabbing one of yours. The single way the agent touches a tab you opened is when you explicitly hand it over with `tab` (by `index` or `url`). `close` closes only a tab recorded as agent-created and refuses user tabs adopted through `tab`. Tabs you have open stay at the URLs you left them.
+The agent acts only on its own dedicated tab, tracked by a stable tab id that persists across calls. `navigate` opens that tab if it does not exist; it never reuses a tab you opened. Read and action verbs refuse to run when no agent tab exists rather than grabbing one of yours. The single way the agent touches a tab you opened is when you explicitly hand it over with `tab` (by `index` or `url`). `close` closes only a tab recorded as agent-created and refuses user tabs adopted through `tab`. Tabs you have open stay at the URLs you left them.
 
 ## Configuration
 
@@ -100,7 +110,7 @@ Account choice and defaults live in config, never hardcoded:
 
 Two optional keys control the browser, and browser detection works without either:
 
-- `"browser"` pins which browser to drive (`arc`, `dia`, `chrome`, `edge`, `brave`, `vivaldi`, `chromium`, `opera`). Omit it to follow your default browser.
+- `"browser"` pins which browser to drive (`firefox`, `firefox-developer`, `firefox-nightly`, `nightly`, `arc`, `dia`, `chrome`, `edge`, `brave`, `vivaldi`, `chromium`, `opera`). Omit it to follow your default browser.
 - `"userDataDir"` (for example `"~/.pi/state/pi-browser-use/profile"`) is the separate automation profile used for browsers that refuse debugging on the normal profile, and is ignored for browsers that do not need it.
 
 Both have environment overrides (`PI_BROWSER_USE_BROWSER`, `PI_BROWSER_USE_USER_DATA_DIR`), and the file path itself is overridable with `PI_BROWSER_USE_CONFIG`. For `aws-sso-login`, the account resolves from `account` param, then config `aws.ssoAccountEmail`; if neither is set and the chooser offers multiple accounts, the shortcut lists them and asks instead of guessing. The `profile` param is the profile you want credentials for; when it is a role-assumption profile (`role_arn` + `source_profile`), the login runs against the profile it chains from, since only that one owns an SSO session.
@@ -116,6 +126,8 @@ browser tool (index.ts)
             └─ wait-for.mjs
   helpers.mjs   shared: browser selection and launch, CDP connect,
                 redaction, config, spawn
+  bidi.mjs      Firefox transport (WebDriver BiDi)
+  bidi-broker.mjs  holds Firefox's one automation session
 ```
 
 `test-harness.mjs` runs the exact dispatcher the tool uses, for verifying primitives and shortcuts without a pi reload: `node test-harness.mjs <action> key=value ...`.
@@ -129,4 +141,4 @@ browser tool (index.ts)
 
 ## Security
 
-The debug port lets any local process drive your browser with your logged-in sessions. It binds to `127.0.0.1` and `--remote-allow-origins=http://127.0.0.1`, which blocks malicious websites (DNS-rebinding) but not other local processes. Quitting and reopening the browser normally turns the port off.
+The debug port lets any local process drive your browser with your logged-in sessions. Chromium browsers bind it to `127.0.0.1` with `--remote-allow-origins=http://127.0.0.1`; Firefox binds to localhost and rejects requests that carry an `Origin` header. Both block malicious websites (DNS-rebinding) but not other local processes. Quitting and reopening the browser normally turns the port off.

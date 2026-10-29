@@ -6,17 +6,29 @@
 // call, which hangs indefinitely against a busy real browser with dozens of
 // targets. Attaching to just the target tab over raw CDP is instant and
 // unaffected by how many other tabs are open. No third-party dependency.
+// Firefox has no CDP endpoint and is driven over WebDriver BiDi instead
+// (bidi.mjs), behind the same connection and page surface.
 //
 // Requires Node 22+ (global WebSocket and fetch).
 
 import { execFile, spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 
+const Q = new URL(import.meta.url).search;
+const { BiDiConnection } = await import(new URL("./bidi.mjs", import.meta.url).href + Q);
+
+// Chromium browsers serve CDP on one port and Firefox serves BiDi on another, so
+// a Chromium browser still holding its port never blocks driving Firefox.
 export const PORT = process.env.BROWSER_CDP_PORT || "9222";
+export const BIDI_PORT = process.env.BROWSER_BIDI_PORT || "9223";
 export const ORIGIN = process.env.BROWSER_CDP_ORIGIN || "http://127.0.0.1";
 export const CDP = `http://127.0.0.1:${PORT}`;
+
+export function portFor(key) {
+  return BROWSERS[key]?.engine === "bidi" ? BIDI_PORT : PORT;
+}
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -64,10 +76,6 @@ async function httpJson(path, timeoutMs = 3000) {
   }
 }
 
-export async function cdpUp() {
-  return (await httpJson("/json/version", 2000)) != null;
-}
-
 // --- Browser selection ------------------------------------------------------
 // The engine speaks Chrome DevTools Protocol, so it drives any Chromium-family
 // browser; only launching is browser-specific. Arc is the browser this tool was
@@ -87,9 +95,18 @@ export async function cdpUp() {
 // Opera number on their own tracks, so their version proves nothing and they are
 // assumed locked rather than promised to the user as drivable.
 
+//
+// `engine: "bidi"` marks Firefox builds. Firefox dropped CDP but serves WebDriver
+// BiDi on --remote-debugging-port, and unlike Chromium 136+ it does so on the
+// user's own profile, so their logins carry over.
+
 export const BROWSERS = {
   arc: { label: "Arc", app: "Arc", proc: "Arc", bundleId: "company.thebrowser.browser" },
   dia: { label: "Dia", app: "Dia", proc: "Dia", bundleId: "company.thebrowser.dia" },
+  firefox: { label: "Firefox", app: "Firefox", proc: "firefox", bundleId: "org.mozilla.firefox", engine: "bidi" },
+  "firefox-developer": { label: "Firefox Developer Edition", app: "Firefox Developer Edition", proc: "firefox", bundleId: "org.mozilla.firefoxdeveloperedition", engine: "bidi" },
+  "firefox-nightly": { label: "Firefox Nightly", app: "Firefox Nightly", proc: "firefox", bundleId: "org.mozilla.nightly", engine: "bidi" },
+  nightly: { label: "Nightly", app: "Nightly", proc: "firefox", bundleId: "org.mozilla.nightlyunofficial", engine: "bidi" },
   chrome: { label: "Google Chrome", app: "Google Chrome", proc: "Google Chrome", bundleId: "com.google.chrome", profileLock: { since: 136, chromiumVersioned: true } },
   edge: { label: "Microsoft Edge", app: "Microsoft Edge", proc: "Microsoft Edge", bundleId: "com.microsoft.edgemac", profileLock: { since: 136, chromiumVersioned: true } },
   chromium: { label: "Chromium", app: "Chromium", proc: "Chromium", bundleId: "org.chromium.chromium", profileLock: { since: 136, chromiumVersioned: true } },
@@ -105,18 +122,13 @@ export const UNDRIVABLE_BROWSERS = {
     label: "Safari",
     bundleId: "com.apple.safari",
     reason:
-      "Safari does not speak the Chrome DevTools Protocol. Its WebDriver and MCP automation run an isolated session that does not carry your cookies or logins, which is the whole point of this tool, so Safari is not supported.",
-  },
-  firefox: {
-    label: "Firefox",
-    bundleId: "org.mozilla.firefox",
-    reason: "Firefox does not expose the Chrome DevTools Protocol endpoint this tool drives, so it is not supported.",
+      "Safari does not speak the Chrome DevTools Protocol or WebDriver BiDi. Its WebDriver and MCP automation run an isolated session that does not carry your cookies or logins, which is the whole point of this tool, so Safari is not supported.",
   },
 };
 
 // Order used when neither config nor the system default settles it. Browsers
 // that can still be driven on the user's real profile come first.
-const PREFERENCE = ["arc", "dia", "chrome", "edge", "brave", "vivaldi", "chromium", "opera"];
+const PREFERENCE = ["arc", "dia", "firefox", "firefox-developer", "firefox-nightly", "nightly", "chrome", "edge", "brave", "vivaldi", "chromium", "opera"];
 
 const APP_DIRS = ["/Applications", join(homedir(), "Applications"), "/System/Applications"];
 
@@ -222,7 +234,7 @@ export function chooseBrowser({ configured, systemDefault, installed, userDataDi
       : def
         ? `${def.label} is your default browser but only exposes debugging on a throwaway profile`
         : systemDefault
-          ? "your default browser is not a supported Chromium browser"
+          ? "your default browser is not a supported browser"
           : "your default browser could not be determined";
     return { ok: true, key: best.key, note: `${why}, so ${best.label} is used instead` };
   }
@@ -234,7 +246,7 @@ export function chooseBrowser({ configured, systemDefault, installed, userDataDi
   if (locked.length) return { ok: false, error: profileLockError(locked[0]) };
   return {
     ok: false,
-    error: `No supported browser found. This tool drives Chromium-family browsers (${Object.keys(BROWSERS).join(", ")}). ${UNDRIVABLE_BROWSERS[systemDefault]?.reason || ""}`.trim(),
+    error: `No supported browser found. This tool drives Chromium-family browsers and Firefox (${Object.keys(BROWSERS).join(", ")}). ${UNDRIVABLE_BROWSERS[systemDefault]?.reason || ""}`.trim(),
   };
 }
 
@@ -243,23 +255,24 @@ function profileLockError(b) {
   return `${b.label}${version} does not expose the debug port on your normal profile (Chromium 136 removed that), so it cannot be driven inside your logged-in session. Install or configure another Chromium browser ("browser" in ~/.pi/config/pi-browser-use/config.json), or set "userDataDir" there to drive ${b.label} in a separate automation profile you sign into once.`;
 }
 
-// Which browser is answering on the debug port, or null when nothing is. Identify
-// it from the process that owns the listening socket: with several Chromium
-// browsers running, the port holder is the only honest answer.
-export async function connectedBrowser() {
-  if (!(await cdpUp())) return null;
-  const pids = await sh("lsof", ["-ti", `tcp:${PORT}`, "-sTCP:LISTEN"], 5000);
+// Which browser is listening on a debug port, or null when nothing is. Identify
+// it from the process that owns the listening socket: with several browsers
+// running, the port holder is the only honest answer.
+export async function connectedBrowser(port = PORT) {
+  const pids = await sh("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], 5000);
   const pid = pids.stdout.trim().split("\n")[0];
-  if (pid) {
-    const ps = await sh("ps", ["-p", pid, "-o", "comm="], 5000);
-    const cmd = ps.stdout.trim();
-    for (const [key, spec] of Object.entries(BROWSERS)) {
-      if (cmd.includes(`/${spec.app}.app/`) || cmd.endsWith(`/${spec.proc}`)) return { key, label: spec.label };
-    }
-    if (cmd) return { key: null, label: cmd.split("/").pop() };
+  if (!pid) return null;
+  const ps = await sh("ps", ["-p", pid, "-o", "comm="], 5000);
+  const cmd = ps.stdout.trim();
+  // Match the app bundle first: every Firefox build's process is named "firefox".
+  const entries = Object.entries(BROWSERS);
+  const hit = entries.find(([, s]) => cmd.includes(`/${s.app}.app/`)) || entries.find(([, s]) => cmd.endsWith(`/${s.proc}`));
+  if (hit) return { key: hit[0], label: hit[1].label, engine: hit[1].engine || "cdp", port, pid };
+  if (port === PORT) {
+    const ver = await httpJson("/json/version", 2000);
+    if (ver) return { key: null, label: String(ver.Browser || cmd.split("/").pop() || "a Chromium browser"), engine: "cdp", port, pid };
   }
-  const ver = await httpJson("/json/version", 2000);
-  return { key: null, label: String(ver?.Browser || "a Chromium browser") };
+  return { key: null, label: cmd.split("/").pop() || "an unknown process", engine: null, port, pid };
 }
 
 // Config and environment inputs for selection, shared by ensureBrowser and the
@@ -279,37 +292,155 @@ export function browserSettings({ browser } = {}) {
   };
 }
 
-// Guarantee a drivable browser is running with the CDP port. No-op when the
+// Which browser to drive and whether it is already listening. Shared by
+// ensureBrowser and the `browsers` diagnostic. The choice comes first; a live
+// port is used as is only when it belongs to that choice or, because one port
+// can have only one holder, to another browser speaking the same protocol.
+export async function planBrowser({ browser } = {}) {
+  const { configured, configuredKey, userDataDir, assumeYes } = browserSettings({ browser });
+  const [systemDefault, installed] = await Promise.all([systemDefaultBrowser(), detectBrowsers({ userDataDir })]);
+  const choice = chooseBrowser({ configured, systemDefault, installed, userDataDir });
+  let holder = null;
+  if (choice.ok) {
+    holder = await connectedBrowser(portFor(choice.key));
+  } else {
+    // Nothing selectable, but a browser already listening can still be driven.
+    holder = (await connectedBrowser(PORT)) || (await connectedBrowser(BIDI_PORT));
+  }
+  // Each transport connects only to its own port, so a holder speaking the other
+  // protocol (or no browser protocol at all) cannot be driven.
+  const wantEngine = choice.ok ? BROWSERS[choice.key].engine || "cdp" : null;
+  if (holder && (!holder.engine || (wantEngine && holder.engine !== wantEngine))) holder = null;
+  return { configured, configuredKey, userDataDir, assumeYes, systemDefault, installed, choice, holder };
+}
+
+// The endpoint every connection in this process talks to, set by ensureBrowser.
+let active = null;
+function setActive(engine, port, label) {
+  active = { engine, port, label };
+}
+async function activeEndpoint() {
+  if (active) return active;
+  const plan = await planBrowser();
+  if (plan.holder) setActive(plan.holder.engine, plan.holder.port, plan.holder.label);
+  else if (plan.choice.ok) setActive(BROWSERS[plan.choice.key].engine || "cdp", portFor(plan.choice.key), BROWSERS[plan.choice.key].label);
+  else setActive("cdp", PORT, "the browser");
+  return active;
+}
+
+// Whether the browser this process drives is listening, without launching it.
+export async function browserUp() {
+  const ep = await activeEndpoint();
+  if (ep.engine === "cdp") return (await httpJson("/json/version", 2000)) != null;
+  return (await connectedBrowser(ep.port)) != null;
+}
+export const cdpUp = browserUp;
+
+function isRunning(path) {
+  return sh("pgrep", ["-f", `^${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/Contents/MacOS/`]).then((r) => Boolean(r.stdout.trim()));
+}
+
+// --- Firefox profile ---------------------------------------------------------
+// The Firefox profile an app runs by default: the install's default profile in
+// profiles.ini whose compatibility.ini says this app last ran it. Returns null
+// rather than guessing, because the prefs written below must land on the
+// profile that is about to be launched.
+export function firefoxProfile(appPath, root = join(homedir(), "Library", "Application Support", "Firefox")) {
+  let ini;
+  try {
+    ini = readFileSync(join(root, "profiles.ini"), "utf8");
+  } catch {
+    return null;
+  }
+  const defaults = [...ini.matchAll(/^\[Install[^\]]*\][^[]*?^Default=(.+)$/gm)].map((m) => m[1].trim());
+  const all = [...ini.matchAll(/^Path=(.+)$/gm)].map((m) => m[1].trim());
+  const candidates = [...new Set([...defaults, ...all])];
+  const want = `LastPlatformDir=${appPath}/Contents/Resources`;
+  for (const rel of candidates) {
+    const dir = rel.startsWith("/") ? rel : join(root, rel);
+    try {
+      if (readFileSync(join(dir, "compatibility.ini"), "utf8").split("\n").some((l) => l.trim() === want)) return dir;
+    } catch {
+      /* not this one */
+    }
+  }
+  return null;
+}
+
+// Prefs written while Firefox is closed, read on the next start.
+// - remote.prefs.recommended=false: with the debug port on, Firefox otherwise
+//   applies its test-automation prefs for the whole run, which turns off Safe
+//   Browsing, tracking protection, password saving, and add-on updates in the
+//   user's everyday browser.
+// - browser.sessionstore.resume_session_once: restores the tabs that were open at
+//   the quit even when Firefox is not set to restore sessions. This is the same
+//   pref Firefox's own restart uses, and it resets itself after one start.
+export function firefoxLaunchPrefs({ restoreSession }) {
+  const lines = ['user_pref("remote.prefs.recommended", false);'];
+  if (restoreSession) lines.push('user_pref("browser.sessionstore.resume_session_once", true);');
+  return lines;
+}
+
+function writeFirefoxPrefs(profileDir, lines) {
+  const path = join(profileDir, "prefs.js");
+  let current = "";
+  try {
+    current = readFileSync(path, "utf8");
+  } catch {
+    /* a new profile has no prefs.js yet */
+  }
+  appendFileSync(path, (current && !current.endsWith("\n") ? "\n" : "") + lines.join("\n") + "\n");
+}
+
+// Guarantee a drivable browser is running with its debug port. No-op when the
 // port is already up. Enabling the port needs a quit+reopen (tabs and logins
 // persist); gate that behind `confirm`.
 export async function ensureBrowser({ confirm, browser } = {}) {
-  const { configured, configuredKey, userDataDir, assumeYes } = browserSettings({ browser });
+  const { configuredKey, userDataDir, assumeYes, systemDefault, installed, choice, holder } = await planBrowser({ browser });
 
-  // The debug port is one machine-wide resource, so whoever already holds it is what
-  // can be driven; config cannot outrank it without quitting the browser the user is
-  // in. Name the disagreement rather than leaving it to be inferred.
-  const holder = await connectedBrowser();
   if (holder) {
-    const mismatch = configuredKey && BROWSERS[configuredKey] && holder.key !== configuredKey;
+    setActive(holder.engine, holder.port, holder.label);
+    const want = choice.ok ? choice.key : configuredKey;
+    const mismatch = want && BROWSERS[want] && holder.key !== want;
     return {
       ok: true,
       relaunched: false,
       browser: holder.label,
+      port: holder.port,
       note: mismatch
-        ? `${BROWSERS[configuredKey].label} is configured, but ${holder.label} already holds the debug port; quit ${holder.label} and retry to switch`
+        ? `${BROWSERS[want].label} is the selected browser${choice.note ? ` (${choice.note})` : ""}, but ${holder.label} already holds debug port ${holder.port}; quit ${holder.label} and retry to switch`
         : undefined,
     };
   }
 
-  const [systemDefault, installed] = await Promise.all([systemDefaultBrowser(), detectBrowsers({ userDataDir })]);
-  const choice = chooseBrowser({ configured, systemDefault, installed, userDataDir });
   if (!choice.ok) return { ok: false, error: choice.error, systemDefault, installed: installed.map((b) => b.key) };
 
   const picked = installed.find((b) => b.key === choice.key);
   const spec = BROWSERS[choice.key];
+  const isFirefox = spec.engine === "bidi";
+  const port = portFor(choice.key);
   const separateProfile = Boolean(picked?.profileLocked && userDataDir);
-  const ps = await sh("pgrep", ["-x", spec.proc]);
-  if (ps.stdout.trim()) {
+
+  // Firefox reads the prefs that keep the user's browser intact from its profile,
+  // so the profile must be known before anything is quit.
+  const ffProfile = isFirefox ? firefoxProfile(picked.path) : null;
+  if (isFirefox && !ffProfile) {
+    return {
+      ok: false,
+      error: `Could not find the Firefox profile ${spec.label} uses (no profile in ~/Library/Application Support/Firefox/profiles.ini was last run by ${picked.path}). Open ${spec.label} once normally, quit it, and retry.`,
+      browser: spec.label,
+    };
+  }
+
+  // Something that is not this browser's kind already owns the port, so a relaunch
+  // could not open it. Say so before quitting anything.
+  const squatter = await connectedBrowser(port);
+  if (squatter) {
+    return { ok: false, error: `Debug port ${port} is held by ${squatter.label} (pid ${squatter.pid}), so ${spec.label} cannot open it. Quit that process and retry.`, browser: spec.label };
+  }
+
+  const wasRunning = await isRunning(picked.path);
+  if (wasRunning) {
     const prompt = separateProfile
       ? `${spec.label} can only be driven in a separate automation profile. Quit ${spec.label} and reopen it in the profile at ${userDataDir}? That profile has its own tabs and sign-ins, so your current tabs and logins are not carried over.`
       : `${spec.label} is running without the debug port. Quit and relaunch ${spec.label} to enable browser control? Your tabs${choice.key === "arc" ? ", spaces," : ""} and logins are restored.`;
@@ -322,35 +453,52 @@ export async function ensureBrowser({ confirm, browser } = {}) {
       // not something to do on silence.
       return {
         ok: false,
-        error: `${spec.label} is running without the debug port, and there is no way to ask for your confirmation here. Run the browser "ensure" action in an interactive session, quit ${spec.label} yourself, or start it with --remote-debugging-port=${PORT}. Set "autoApproveRelaunch": true in ~/.pi/config/pi-browser-use/config.json (or PI_BROWSER_USE_ASSUME_YES=1) to allow unattended relaunches.`,
+        error: `${spec.label} is running without the debug port, and there is no way to ask for your confirmation here. Run the browser "ensure" action in an interactive session, or quit ${spec.label} yourself and retry${
+          // Firefox started by hand would skip the prefs that keep Safe Browsing and
+          // password saving on, so do not suggest the flag for it.
+          isFirefox ? "" : `, or start it with --remote-debugging-port=${port}`
+        }. Set "autoApproveRelaunch": true in ~/.pi/config/pi-browser-use/config.json (or PI_BROWSER_USE_ASSUME_YES=1) to allow unattended relaunches.`,
         browser: spec.label,
       };
     }
-    const quit = await sh("osascript", ["-e", `quit app "${spec.app}"`]);
-    await sleep(2500);
-    const still = await sh("pgrep", ["-x", spec.proc]);
-    if (still.stdout.trim()) {
+    // Quit by bundle id: every Firefox build shares the process name "firefox".
+    const quit = await sh("osascript", ["-e", `tell application id "${spec.bundleId}" to quit`]);
+    for (let i = 0; i < 20 && (await isRunning(picked.path)); i++) await sleep(500);
+    if (await isRunning(picked.path)) {
       const why = quit.stderr.trim() || (quit.code ? `osascript exited ${quit.code}` : "it is still running");
       return { ok: false, error: `${spec.label} did not quit (${why}), so the debug port could not be enabled. These browsers drop the flag when an instance is already running: close ${spec.label} manually and retry.`, browser: spec.label };
     }
   }
 
-  const args = [`--remote-debugging-port=${PORT}`, `--remote-allow-origins=${ORIGIN}`];
-  if (separateProfile) args.push(`--user-data-dir=${userDataDir}`);
-  const opened = await sh("open", ["-na", spec.app, "--args", ...args]);
+  let args;
+  if (isFirefox) {
+    writeFirefoxPrefs(ffProfile, firefoxLaunchPrefs({ restoreSession: wasRunning }));
+    // Firefox rejects any request carrying an Origin header unless allowed, which
+    // already blocks web pages; no allow-origins flag is passed.
+    args = [`--remote-debugging-port=${port}`, "-profile", ffProfile];
+  } else {
+    args = [`--remote-debugging-port=${port}`, `--remote-allow-origins=${ORIGIN}`];
+    if (separateProfile) args.push(`--user-data-dir=${userDataDir}`);
+  }
+  const opened = await sh("open", ["-na", picked.path, "--args", ...args]);
   if (opened.code) {
     return { ok: false, error: `Could not launch ${spec.label}: ${opened.stderr.trim() || `open exited ${opened.code}`}`, browser: spec.label };
   }
-  for (let i = 0; i < 15; i++) {
-    if (await cdpUp()) return { ok: true, relaunched: true, browser: spec.label, note: choice.note };
+  for (let i = 0; i < 30; i++) {
+    const up = await connectedBrowser(port);
+    if (up?.key === choice.key && (isFirefox || (await httpJson("/json/version", 2000)))) {
+      setActive(isFirefox ? "bidi" : "cdp", port, spec.label);
+      return { ok: true, relaunched: true, browser: spec.label, port, note: choice.note };
+    }
     await sleep(1000);
   }
   // The browser launched but never opened the port, so the build enforces a
   // restriction the registry does not know about yet.
-  const hint = userDataDir
-    ? ""
-    : ` If this build is Chromium 136 or later, it only allows debugging in a separate profile: set "userDataDir" in ~/.pi/config/pi-browser-use/config.json.`;
-  return { ok: false, error: `${spec.label} started but did not expose CDP on ${PORT}.${hint}`, browser: spec.label };
+  const hint =
+    userDataDir || isFirefox
+      ? ""
+      : ` If this build is Chromium 136 or later, it only allows debugging in a separate profile: set "userDataDir" in ~/.pi/config/pi-browser-use/config.json.`;
+  return { ok: false, error: `${spec.label} started but did not open debug port ${port}.${hint}`, browser: spec.label };
 }
 
 // --- Raw CDP connection over the browser websocket --------------------------
@@ -428,6 +576,27 @@ class CDPConnection {
     } catch {
       /* ignore */
     }
+  }
+
+  // The tab-level surface shared with the Firefox BiDi connection.
+  async listTargets() {
+    return listCdpTargets();
+  }
+  async instanceId() {
+    return cdpInstanceId();
+  }
+  async createTarget(url = "about:blank") {
+    const { targetId } = await this.send("Target.createTarget", { url });
+    return targetId;
+  }
+  async attach(targetId) {
+    const { sessionId } = await this.send("Target.attachToTarget", { targetId, flatten: true });
+    const ps = new PageSession(this, targetId, sessionId);
+    await ps.enable();
+    return ps;
+  }
+  async closeTarget(targetId) {
+    return this.send("Target.closeTarget", { targetId });
   }
 }
 
@@ -544,25 +713,34 @@ class PageSession {
 }
 
 // List real page targets (fast HTTP, no attach). id is the CDP targetId.
-export async function listTargets() {
+async function listCdpTargets() {
   const list = (await httpJson("/json/list", 4000)) || [];
   return list.filter((t) => t.type === "page" && !String(t.url).startsWith("devtools://"));
 }
 
+// The browser's own CDP GUID changes on every launch, so it identifies the
+// instance a recorded tab belongs to.
+async function cdpInstanceId() {
+  const ver = await httpJson("/json/version", 2000);
+  const ws = ver?.webSocketDebuggerUrl || "";
+  return ws.split("/").pop() || null;
+}
+
+// One connection to the browser this process drives, over CDP or BiDi. Callers
+// use the shared surface: listTargets, instanceId, createTarget, attach,
+// closeTarget. Firefox connections go through the broker and share its session.
 export async function withConnection(fn) {
-  const cdp = await CDPConnection.open();
+  const ep = await activeEndpoint();
+  const conn = ep.engine === "bidi" ? await BiDiConnection.open(ep.port) : await CDPConnection.open();
   try {
-    return await fn(cdp);
+    return await fn(conn);
   } finally {
-    cdp.close();
+    await conn.close();
   }
 }
 
-async function attach(cdp, targetId) {
-  const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
-  const ps = new PageSession(cdp, targetId, sessionId);
-  await ps.enable();
-  return ps;
+export async function listTargets() {
+  return withConnection((conn) => conn.listTargets());
 }
 
 // --- Dedicated agent tab ----------------------------------------------------
@@ -597,13 +775,6 @@ function writeState(s) {
   }
 }
 
-// The browser's own CDP GUID changes on every launch, so it identifies the
-// instance a recorded tab belongs to.
-export async function browserInstanceId() {
-  const ver = await httpJson("/json/version", 2000);
-  const ws = ver?.webSocketDebuggerUrl || "";
-  return ws.split("/").pop() || null;
-}
 
 export function setAgentTarget(id, ownership, browserId = null) {
   const state = readState();
@@ -646,8 +817,8 @@ export function agentTargetIsUsable(saved, targets, browserId) {
 // none is owned (used by navigate) so the agent never grabs a user tab. With
 // create=false, returns an instructive error when no agent tab exists.
 export async function withAgentPage(fn, { create = false, onAdopted = null } = {}) {
-  return withConnection(async (cdp) => {
-    const [targets, browserId] = await Promise.all([listTargets(), browserInstanceId()]);
+  return withConnection(async (conn) => {
+    const [targets, browserId] = await Promise.all([conn.listTargets(), conn.instanceId()]);
     const saved = getAgentTarget();
     const usable = agentTargetIsUsable(saved, targets, browserId);
     if (saved && !usable) clearAgentTarget();
@@ -665,27 +836,26 @@ export async function withAgentPage(fn, { create = false, onAdopted = null } = {
           isError: true,
         };
       }
-      const { targetId: newId } = await cdp.send("Target.createTarget", { url: "about:blank" });
-      targetId = newId;
+      targetId = await conn.createTarget("about:blank");
       setAgentTarget(targetId, "created", browserId);
       await sleep(150);
     }
-    const page = await attach(cdp, targetId);
-    return fn(page, cdp);
+    const page = await conn.attach(targetId);
+    return fn(page, conn);
   });
 }
 
 // Attach directly to a target id (used by shortcuts that manage their own tab).
-export async function attachTarget(cdp, targetId) {
-  return attach(cdp, targetId);
+export async function attachTarget(conn, targetId) {
+  return conn.attach(targetId);
 }
-export async function createPage(cdp, url = "about:blank") {
-  const { targetId } = await cdp.send("Target.createTarget", { url });
+export async function createPage(conn, url = "about:blank") {
+  const targetId = await conn.createTarget(url);
   await sleep(150);
-  return attach(cdp, targetId);
+  return conn.attach(targetId);
 }
-export async function closeTarget(cdp, targetId) {
-  return cdp.send("Target.closeTarget", { targetId });
+export async function closeTarget(conn, targetId) {
+  return conn.closeTarget(targetId);
 }
 
 // Keep obvious secrets out of model-visible output and session logs.

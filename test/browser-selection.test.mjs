@@ -59,3 +59,9 @@ test("an unreadable default-browser setting is reported as unknown, not as Safar
   assert.equal(r.key, "arc");
   assert.match(r.note, /could not be determined/);
 });
+
+test("a Firefox default browser is driven in place of an installed Chromium browser", () => {
+  const nightly = { key: "nightly", label: "Nightly", realProfile: true, drivable: true, profileLocked: false };
+  const r = chooseBrowser({ configured: null, systemDefault: "nightly", installed: [arc, nightly], userDataDir: null });
+  assert.equal(r.key, "nightly");
+});
