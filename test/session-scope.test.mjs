@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 process.env.HOME = mkdtempSync(tmpdir() + "/pbu-");
-const { setAgentTarget, getAgentTarget, clearAgentTarget } = await import("/Users/albert/.pi/agent/git/github.com/longweekendprojects/pi-browser-use/helpers.mjs");
+const { setAgentTarget, getAgentTarget, clearAgentTarget } = await import("../helpers.mjs");
 
 test("one session's tab is invisible to another session", () => {
   process.env.PI_BROWSER_USE_SESSION = "session-a";

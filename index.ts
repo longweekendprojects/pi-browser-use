@@ -1,5 +1,6 @@
 // pi-browser-use: a native pi tool that drives the user's real, logged-in
-// Chromium browser (Arc, Chrome, Edge, Brave, ...) over CDP. Two layers:
+// browser (Firefox over WebDriver BiDi; Arc, Chrome, Edge, Brave, ... over CDP).
+// Two layers:
 // primitive verbs and a library of named shortcuts that codify multi-step
 // flows. Engine lives in core.mjs.
 
@@ -48,19 +49,19 @@ export default async function (pi: ExtensionAPI) {
     label: "Browser",
     description:
       "Fallback browser control, not a default. Prefer native CLIs/APIs for links and data (notion-cli, linear-cli, gh, the Slack API, fetch_content, web_search); reach for this only when no native tool can reach the resource, the native tool hits a real limit, the task needs the rendered or logged-in page, or the user explicitly asks. " +
-      "Drives the user's real, logged-in Chromium browser (Arc, Chrome, Edge, Brave, Vivaldi, Chromium, Opera; Safari and Firefox cannot be driven) over the Chrome DevTools Protocol, reusing their tabs, cookies, and logins. " +
+      "Drives the user's real, logged-in browser, their system default unless configured otherwise (Firefox over WebDriver BiDi; Arc, Chrome, Edge, Brave, Vivaldi, Chromium, Opera over the Chrome DevTools Protocol; Safari cannot be driven), reusing their tabs, cookies, and logins. " +
       "It only ever acts on its own dedicated tab and never reuses a tab the user opened; the tab record is per pi session and per browser launch, so one session cannot inherit another's tab. `tab` is the explicit handover of one of the user's tabs, and `navigate` will not repoint a handed-over tab without asking. " +
       "Primitives: ensure (start the browser with the debug port), browsers (report which browsers are installed, which is the system default, and which one would be driven; run this first when browser control fails), navigate (opens the agent's own tab), snapshot (list interactive elements with @eN refs), read (page text), click (ref/selector/text), fill (ref/selector + value), eval (JS), screenshot, tabs (list, marks the agent tab), tab (take over a user tab by index/url), close (close only an agent-created tab). " +
       "Shortcuts (hardened multi-step flows): " + catalog.join(" | "),
     promptSnippet:
-      "Control the user's logged-in Chromium browser (Arc, Chrome, Edge, Brave, ...): primitives (navigate/snapshot/click/fill/read) plus shortcuts (aws-sso-login, wait-for)",
+      "Control the user's logged-in default browser (Firefox, Arc, Chrome, Edge, Brave, ...): primitives (navigate/snapshot/click/fill/read) plus shortcuts (aws-sso-login, wait-for)",
     promptGuidelines: [
       "The browser is a fallback, not the default. For a link or external data, try the native tool first (notion-cli, linear-cli, gh, the Slack API, fetch_content, web_search); use the browser only when no native tool can reach it, the native tool hits a real limit (missing scope, rendered-only value), the task needs an interactive or visual flow, or the user explicitly asks. When you fall back, say in one line why the native path did not fit.",
       "browser primitive workflow: navigate, then snapshot to get @eN refs, then click/fill by ref; use read for page text, wait-for instead of sleeping, and eval for anything the page model cannot express.",
       "Prefer a browser shortcut when one fits the task: aws-sso-login refreshes expired AWS SSO credentials end to end; wait-for blocks until a URL/text/selector appears.",
       "The browser tool never navigates or alters a tab the user already opened; it works in its own tab, and it opens a fresh one rather than reusing whatever is in front. Only use `tab` to adopt one of the user's tabs when the user explicitly asks you to operate on it; navigating an adopted tab away from the page the user had open needs their confirmation. Use `close` when the browser task ends; it closes only the tab this session created, never an adopted tab and never a window of the user's tabs.",
       "When AWS commands fail with expired/missing SSO token, call browser with action aws-sso-login to refresh before retrying.",
-      "If browser control fails to connect, run action browsers: it reports the system default browser, which Chromium browsers are installed, and why the chosen one can or cannot be driven. Safari and Firefox cannot be driven at all; say so instead of retrying.",
+      "If browser control fails to connect, run action browsers: it reports the system default browser, which supported browsers are installed, and why the chosen one can or cannot be driven. Safari cannot be driven at all; say so instead of retrying.",
     ],
     parameters: Type.Object({
       action: StringEnum(ACTIONS as [string, ...string[]]),
@@ -78,7 +79,7 @@ export default async function (pi: ExtensionAPI) {
       account: Type.Optional(Type.String({ description: "IdP account email for aws-sso-login (default from config)" })),
       force: Type.Optional(Type.Boolean({ description: "Force aws-sso-login even if the token is still valid" })),
       browser: Type.Optional(
-        Type.String({ description: "Browser to drive for ensure/browsers: arc, dia, chrome, edge, brave, vivaldi, chromium, opera (default from config, else the system default browser)" }),
+        Type.String({ description: "Browser to drive for ensure/browsers: firefox, firefox-developer, firefox-nightly, nightly, arc, dia, chrome, edge, brave, vivaldi, chromium, opera (default from config, else the system default browser)" }),
       ),
     }),
     async execute(_toolCallId, params, _signal, onUpdate, ctx) {

@@ -1,6 +1,6 @@
 // Primitive browser actions: the raw verbs the agent composes. Shortcuts build
 // on these. Acting verbs run ONLY on the agent's own dedicated tab, over raw
-// CDP (attaches to that one tab, never the whole browser), so they stay fast
+// CDP or Firefox's BiDi (one tab, never the whole browser), so they stay fast
 // and reliable no matter how many other tabs the user has open. `navigate`
 // opens the agent tab if needed; `tab` is the explicit handover of a user tab.
 
@@ -9,25 +9,19 @@ const imp = (rel) => import(new URL(rel, import.meta.url).href + Q);
 const {
   withAgentPage,
   withConnection,
-  listTargets,
   getAgentTarget,
   canCloseAgentTarget,
   agentTargetIsUsable,
-  browserInstanceId,
   setAgentTarget,
   clearAgentTarget,
   closeTarget,
-  cdpUp,
+  browserUp,
   ensureBrowser,
-  detectBrowsers,
-  systemDefaultBrowser,
-  chooseBrowser,
-  browserSettings,
-  connectedBrowser,
+  planBrowser,
+  portFor,
   BROWSERS,
   UNDRIVABLE_BROWSERS,
   redact,
-  PORT,
 } = await imp("./helpers.mjs");
 
 export const PRIMITIVES = [
@@ -87,20 +81,15 @@ export async function runPrimitive(params, opts = {}) {
     const label = r.browser || "Browser";
     const why = r.note ? ` (${r.note})` : "";
     return {
-      text: r.ok ? `${label} debug port ready on ${PORT}${r.relaunched ? " (relaunched)" : ""}${why}` : `ERROR: ${r.error}`,
+      text: r.ok ? `${label} debug port ready on ${r.port}${r.relaunched ? " (relaunched)" : ""}${why}` : `ERROR: ${r.error}`,
       details: r,
       isError: !r.ok,
     };
   }
 
   if (action === "browsers") {
-    const { configured, configuredKey, userDataDir, assumeYes } = browserSettings({ browser: params.browser });
-    const [holder, systemDefault, installed] = await Promise.all([
-      connectedBrowser(),
-      systemDefaultBrowser(),
-      detectBrowsers({ userDataDir }),
-    ]);
-    const choice = chooseBrowser({ configured, systemDefault, installed, userDataDir });
+    // The same plan ensureBrowser acts on, so the report cannot contradict it.
+    const { configured, assumeYes, systemDefault, installed, choice, holder } = await planBrowser({ browser: params.browser });
     const defLabel = systemDefault
       ? BROWSERS[systemDefault]?.label || UNDRIVABLE_BROWSERS[systemDefault]?.label || systemDefault
       : "could not be determined";
@@ -113,20 +102,19 @@ export async function runPrimitive(params, opts = {}) {
           : "not drivable (needs a separate profile; set userDataDir)";
       return `${b.label}${version}: ${state}`;
     });
-    // ensureBrowser attaches to whoever already holds the port, so lead with that:
-    // the selection below only applies once the port is free.
     const verdict = choice.ok
-      ? `Would drive on a cold start: ${BROWSERS[choice.key].label}${choice.note ? ` (${choice.note})` : ""}`
-      : `Would fail on a cold start: ${choice.error}`;
+      ? `Selected: ${BROWSERS[choice.key].label}${choice.note ? ` (${choice.note})` : ""}, on debug port ${portFor(choice.key)}`
+      : `No browser can be selected: ${choice.error}`;
     const live = holder
-      ? `Debug port ${PORT}: held by ${holder.label}, which is what browser actions drive right now.${
-          configuredKey && BROWSERS[configuredKey] && holder.key !== configuredKey
-            ? ` ${BROWSERS[configuredKey].label} is configured, so quit ${holder.label} and retry to switch.`
-            : ""
+      ? `Debug port ${holder.port}: held by ${holder.label}, which is what browser actions drive right now.${
+          choice.ok && holder.key !== choice.key ? ` Quit ${holder.label} and retry to switch to ${BROWSERS[choice.key].label}.` : ""
         }`
-      : `Debug port ${PORT}: free, so the next browser action launches the browser below.`;
+      : choice.ok
+        ? `Debug port ${portFor(choice.key)}: free, so the next browser action starts ${BROWSERS[choice.key].label} with it.`
+        : "No browser is listening on a debug port.";
     return {
       text: [
+        verdict,
         live,
         ``,
         `Default browser: ${defLabel}`,
@@ -134,8 +122,6 @@ export async function runPrimitive(params, opts = {}) {
         `Relaunch consent: ${assumeYes ? "pre-approved, so no yes/no prompt" : 'asks first (set "autoApproveRelaunch": true in config to skip)'}`,
         ``,
         ...lines,
-        ``,
-        verdict,
       ].join("\n"),
       details: { portHolder: holder, systemDefault, configured, installed, choice },
       isError: false,
@@ -152,7 +138,7 @@ export async function runPrimitive(params, opts = {}) {
         isError: true,
       };
     }
-    if (!(await cdpUp())) {
+    if (!(await browserUp())) {
       return {
         text: "ERROR: browser control is not connected. The tab was left open; `close` will not relaunch the browser.",
         details: { cdpUnavailable: true },
@@ -160,14 +146,14 @@ export async function runPrimitive(params, opts = {}) {
       };
     }
     try {
-      return await withConnection(async (cdp) => {
-        const [targets, browserId] = await Promise.all([listTargets(), browserInstanceId()]);
+      return await withConnection(async (conn) => {
+        const [targets, browserId] = await Promise.all([conn.listTargets(), conn.instanceId()]);
         if (!agentTargetIsUsable(saved, targets, browserId)) {
           clearAgentTarget();
           return { text: "Nothing to close: the recorded agent tab is gone or belongs to a previous browser session.", details: { stale: true } };
         }
         if (targets.some((t) => t.id === saved.id)) {
-          const result = await closeTarget(cdp, saved.id);
+          const result = await closeTarget(conn, saved.id);
           if (result?.success === false) throw new Error("The browser refused to close the agent-created tab");
         }
         clearAgentTarget();
@@ -245,8 +231,8 @@ export async function runPrimitive(params, opts = {}) {
           return { text: `SAVED ${params.path}`, details: { path: params.path } };
         });
       case "tabs":
-        return await withConnection(async () => {
-          const [targets, browserId] = await Promise.all([listTargets(), browserInstanceId()]);
+        return await withConnection(async (conn) => {
+          const [targets, browserId] = await Promise.all([conn.listTargets(), conn.instanceId()]);
           const saved = getAgentTarget();
           const usable = agentTargetIsUsable(saved, targets, browserId);
           const label = saved?.ownership === "created" ? "agent tab (this session)" : "tab you handed over (this session)";
@@ -258,13 +244,13 @@ export async function runPrimitive(params, opts = {}) {
           return { text: lines.join("\n"), details: { count: targets.length } };
         });
       case "tab":
-        return await withConnection(async () => {
-          const targets = await listTargets();
+        return await withConnection(async (conn) => {
+          const targets = await conn.listTargets();
           let target = null;
           if (params.index != null && params.index !== "") target = targets[Number(params.index)];
           else if (params.url) target = targets.find((t) => String(t.url).includes(params.url));
           if (!target) return { text: `No tab matched ${params.index ?? params.url ?? "(nothing given)"}. Use action=tabs to list them.`, details: {}, isError: true };
-          setAgentTarget(target.id, "adopted", await browserInstanceId());
+          setAgentTarget(target.id, "adopted", await conn.instanceId());
           return { text: `Agent now controls: ${target.title || ""}  ${target.url}`, details: { url: target.url } };
         });
       default:

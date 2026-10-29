@@ -13,7 +13,7 @@
 // role-assumption profile has no SSO session of its own, so the login follows
 // `source_profile` and the verification stays on what was asked for.
 //
-// Transport is raw CDP (single tab), so it stays reliable even when the user's
+// Transport is single-tab (raw CDP, or BiDi for Firefox), so it stays reliable even when the user's
 // browser has many tabs open. The account is chosen from params.account or
 // config.aws.ssoAccountEmail; if neither is set, it returns the accounts found
 // and asks rather than guessing.
