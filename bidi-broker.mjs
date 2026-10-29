@@ -75,25 +75,44 @@ function sendToFirefox(method, params) {
   return id;
 }
 
+// One command and its reply, for setup before client routing starts.
+function request(method, params) {
+  return new Promise((res, rej) => {
+    const id = sendToFirefox(method, params);
+    ws.onmessage = (e) => {
+      const m = JSON.parse(String(e.data));
+      if (m.id !== id) return;
+      if (m.type === "error") rej(new Error(`${method} failed: ${m.error}: ${m.message}`));
+      else res(m.result);
+    };
+  });
+}
+
+// Replaces the getter on Navigator.prototype, where Firefox defines it, so the
+// property keeps its native shape: an enumerable accessor, absent from navigator
+// itself. The getter is named like the native one for code that inspects it.
+const HIDE_WEBDRIVER = `() => {
+  const d = Object.getOwnPropertyDescriptor(Navigator.prototype, "webdriver");
+  if (!d || !d.configurable) return;
+  const get = { get webdriver() { return false; } };
+  Object.defineProperty(Navigator.prototype, "webdriver", { ...d, get: Object.getOwnPropertyDescriptor(get, "webdriver").get });
+}`;
+
 async function start() {
   ws = new WebSocket(`ws://127.0.0.1:${port}/session`);
   await new Promise((res, rej) => {
     ws.onopen = res;
     ws.onerror = () => rej(new Error(`Firefox automation port ${port} is not reachable`));
   });
-  const created = new Promise((res, rej) => {
-    ws.onmessage = (e) => {
-      const m = JSON.parse(String(e.data));
-      if (m.id !== 1) return;
-      if (m.type === "error") rej(new Error(`${m.error}: ${m.message}`));
-      else res(m.result);
-    };
-  });
   // "ignore" leaves alerts and confirm dialogs to the user. The default handler
   // would dismiss them in every tab for as long as this session is open.
-  sendToFirefox("session.new", { capabilities: { alwaysMatch: { unhandledPromptBehavior: { default: "ignore" } } } });
-  const r = await created;
+  const r = await request("session.new", { capabilities: { alwaysMatch: { unhandledPromptBehavior: { default: "ignore" } } } });
   hello = { processId: r.capabilities?.["moz:processID"] ?? null, sessionId: r.sessionId };
+  // While the Remote Agent runs, Firefox sets navigator.webdriver to true in every
+  // page, including the user's own tabs, and bot checks then challenge every
+  // site. No pref turns it off, so report false before any page script runs.
+  // The script lives as long as this session, which is the browser's lifetime.
+  await request("script.addPreloadScript", { functionDeclaration: HIDE_WEBDRIVER });
 
   ws.onmessage = (e) => {
     let m;
