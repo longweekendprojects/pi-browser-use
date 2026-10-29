@@ -51,7 +51,8 @@ Two browser limits shape that order, and both produce a specific message rather 
 Firefox keeps your logins: it serves WebDriver BiDi on your normal profile. A few things differ from the Chromium browsers:
 
 - Before it relaunches Firefox, the tool sets two prefs in your profile. `remote.prefs.recommended=false` stops Firefox from switching off Safe Browsing, tracking protection, password saving, and add-on updates while the debug port is on. `browser.sessionstore.resume_session_once` brings back the tabs you had open, once.
-- While the debug port is on, Firefox shows its remote-control indicator (striped address bar and robot icon), and pages see `navigator.webdriver` as true.
+- While the debug port is on, Firefox shows its remote-control indicator (striped address bar and robot icon).
+- Firefox also sets `navigator.webdriver` to true in every page while the debug port is on, and bot checks then challenge every site, including in your own tabs. The tool makes pages report false instead. Tabs that were already open when the tool connected keep reporting true until you reload them.
 - Firefox allows one automation session at a time. A small background `node` process holds it and shares it with every pi session; it exits when Firefox quits.
 - `tabs` lists Firefox tabs by URL only, because reading titles would run script in every tab you have open.
 
