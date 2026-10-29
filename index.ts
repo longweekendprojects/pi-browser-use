@@ -9,6 +9,8 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 
 // jiti injects __dirname (the real extension directory) into the module
 // wrapper. Type-only declaration; erased at compile, resolved at runtime.
@@ -30,6 +32,16 @@ export default async function (pi: ExtensionAPI) {
     if (rawBase && rawBase.startsWith("file:")) dir = fileURLToPath(rawBase).replace(/\/[^/]*$/, "");
   }
   if (!dir) throw new Error("pi-browser-use: cannot resolve extension directory");
+  // Bun, which runs compiled pi builds such as Pi-Bolt, keys its module cache
+  // by file path and ignores the ?v= query, so the token alone would keep
+  // serving the engine from the first load. Drop this extension's engine
+  // modules from that cache first. Under Node this cache holds no ES modules,
+  // so it is a no-op there and the token does the work.
+  const real = realpathSync(dir);
+  const cache = createRequire(join(real, "index.ts")).cache;
+  for (const key of Object.keys(cache ?? {})) {
+    if (key.startsWith(real + "/") && key.endsWith(".mjs")) delete cache[key];
+  }
   const coreSpec = pathToFileURL(join(dir, "core.mjs")).href + token;
   // jiti rewrites a literal import() into its own cached loader, which ignores
   // the ?v= cache-busting query, so engine edits would not load on /reload.
