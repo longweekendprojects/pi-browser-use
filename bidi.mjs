@@ -165,9 +165,9 @@ export class BiDiConnection {
   async createTarget(url = "about:blank") {
     // A foreground create waits until the new tab is visible, which never happens
     // while the Firefox window is covered, minimized, or on another Space. Open it
-    // in the background, then ask Firefox to select it without waiting on that.
+    // in the background and leave it unselected, so the user's selected tab never
+    // changes. Pages load and run normally in an unselected tab.
     const { context } = await this.send("browsingContext.create", { type: "tab", background: true });
-    this.send("browsingContext.activate", { context }, 10000).catch(() => {});
     if (url && url !== "about:blank") await this.send("browsingContext.navigate", { context, url, wait: "none" });
     return context;
   }
