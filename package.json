@@ -1,6 +1,6 @@
 {
   "name": "pi-browser-use",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Native pi tool that drives your real, logged-in default browser (Firefox over WebDriver BiDi; Arc, Chrome, Edge, Brave, ... over CDP), with a library of hardened multi-step shortcuts.",
   "license": "MIT",
   "keywords": [
